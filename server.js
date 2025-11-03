@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -23,7 +24,7 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT || !process.env.FIREBASE_DATABASE_URL)
   throw new Error("Missing Firebase configuration. Set FIREBASE_SERVICE_ACCOUNT and FIREBASE_DATABASE_URL.");
 }
 
-const loadServiceAccount = () => {
+const loadServiceAccount = async () => {
   const value = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (!value) {
     throw new Error("FIREBASE_SERVICE_ACCOUNT is not set");
@@ -31,8 +32,8 @@ const loadServiceAccount = () => {
   if (value.trim().startsWith("{")) {
     return JSON.parse(value);
   }
-  const fs = await import("node:fs/promises");
-  return JSON.parse(await fs.readFile(value, "utf-8"));
+  const contents = await fs.readFile(value, "utf-8");
+  return JSON.parse(contents);
 };
 
 const firebaseCredential = await loadServiceAccount();

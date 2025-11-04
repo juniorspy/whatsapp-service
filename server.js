@@ -78,9 +78,14 @@ const createInstance = async (instanceName, webhookUrl) => {
 
   // Use whatsapp-service webhook endpoint (generic for all stores)
   // The slug will be extracted from instanceName in the webhook handler
-  const webhookTarget = process.env.WHATSAPP_SERVICE_WEBHOOK_URL ??
-                       `${process.env.WHATSAPP_SERVICE_BASE_URL}/webhook/evolution` ??
-                       "https://whatsapp-service.onrpa.com/webhook/evolution";
+  let webhookTarget;
+  if (process.env.WHATSAPP_SERVICE_WEBHOOK_URL) {
+    webhookTarget = process.env.WHATSAPP_SERVICE_WEBHOOK_URL;
+  } else if (process.env.WHATSAPP_SERVICE_BASE_URL) {
+    webhookTarget = `${process.env.WHATSAPP_SERVICE_BASE_URL}/webhook/evolution`;
+  } else {
+    webhookTarget = "https://whatsapp-service.onrpa.com/webhook/evolution";
+  }
 
   logger.info({ instanceName, webhookTarget }, "Creating Evolution instance with whatsapp-service webhook");
 
@@ -146,9 +151,14 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
     const instanceName = `colmado_${normalizeSlug(value.slug)}`;
 
     // Webhook URL now points to whatsapp-service (multi-tenant endpoint)
-    const whatsappServiceWebhook = process.env.WHATSAPP_SERVICE_WEBHOOK_URL ??
-                                   `${process.env.WHATSAPP_SERVICE_BASE_URL}/webhook/evolution` ??
-                                   "https://whatsapp-service.onrpa.com/webhook/evolution";
+    let whatsappServiceWebhook;
+    if (process.env.WHATSAPP_SERVICE_WEBHOOK_URL) {
+      whatsappServiceWebhook = process.env.WHATSAPP_SERVICE_WEBHOOK_URL;
+    } else if (process.env.WHATSAPP_SERVICE_BASE_URL) {
+      whatsappServiceWebhook = `${process.env.WHATSAPP_SERVICE_BASE_URL}/webhook/evolution`;
+    } else {
+      whatsappServiceWebhook = "https://whatsapp-service.onrpa.com/webhook/evolution";
+    }
 
     // Create instance with whatsapp-service webhook (not n8n)
     const { data, token } = await createInstance(instanceName, whatsappServiceWebhook);

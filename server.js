@@ -73,15 +73,27 @@ const evolution = axios.create({
   timeout: Number.parseInt(process.env.EVOLUTION_TIMEOUT ?? "15000", 10)
 });
 
-const createInstance = async (instanceName) => {
+const createInstance = async (instanceName, webhookUrl) => {
   const token = crypto.randomUUID();
+  const webhookTarget = webhookUrl ?? process.env.WEBHOOK_GLOBAL_URL;
+
+  if (!webhookTarget) {
+    throw new Error("Webhook URL is required to create an Evolution instance");
+  }
+
   const response = await evolution.post(
     "/instance/create",
     {
       instanceName,
       token,
       integration: "WHATSAPP-BAILEYS",
-      qrcode: true
+      qrcode: true,
+      webhook: {
+        enabled: true,
+        url: webhookTarget,
+        webhookByEvents: true,
+        events: ["messages.upsert", "qrcode.updated", "connection.update"]
+      }
     },
     {
       headers: {
@@ -123,7 +135,16 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
 
   try {
     const instanceName = `colmado_${normalizeSlug(value.slug)}`;
-    const { data, token } = await createInstance(instanceName);
+    const webhookTarget = value.webhookUrl || process.env.WEBHOOK_GLOBAL_URL;
+
+    if (!webhookTarget) {
+      return res.status(400).json({
+        error: "missing_webhook_url",
+        message: "Webhook URL is required. Provide webhookUrl or set WEBHOOK_GLOBAL_URL."
+      });
+    }
+
+    const { data, token } = await createInstance(instanceName, webhookTarget);
 
     const apiKey =
       data?.instance?.apikey ??
@@ -136,7 +157,7 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       apiKey,
       slug: value.slug,
       telefono: value.telefono,
-      webhookUrl: value.webhookUrl,
+      webhookUrl: webhookTarget,
       status: "pending",
       qrCode: data?.qrcode?.code ?? null,
       createdAt: Date.now(),

@@ -70,7 +70,7 @@ const normalizeSlug = (slug) =>
 
 const evolution = axios.create({
   baseURL: process.env.EVOLUTION_BASE_URL ?? "https://evo.onrpa.com",
-  timeout: Number.parseInt(process.env.EVOLUTION_TIMEOUT ?? "15000", 10)
+  timeout: Number.parseInt(process.env.EVOLUTION_TIMEOUT ?? "45000", 10)
 });
 
 const createInstance = async (instanceName, webhookUrl) => {
@@ -117,7 +117,13 @@ const fetchQr = async (instanceName, apiKey) => {
   const response = await evolution.get(`/instance/connect/${encodeURIComponent(instanceName)}`, {
     headers: { apikey: apiKey }
   });
-  return response.data?.code ?? null;
+  const data = response.data;
+  if (data?.base64) {
+    return data.base64.startsWith('data:')
+      ? data.base64
+      : `data:image/png;base64,${data.base64}`;
+  }
+  return data?.code ?? null;
 };
 
 app.get("/health", (_req, res) => {
@@ -152,6 +158,12 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       (typeof data?.hash === "string" ? data.hash : null) ??
       token;
 
+    const qrCodeData = data?.qrcode?.base64
+      ? (data.qrcode.base64.startsWith('data:')
+          ? data.qrcode.base64
+          : `data:image/png;base64,${data.qrcode.base64}`)
+      : (data?.qrcode?.code ?? null);
+
     const record = {
       instanceName,
       apiKey,
@@ -159,7 +171,7 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       telefono: value.telefono,
       webhookUrl: webhookTarget,
       status: "pending",
-      qrCode: data?.qrcode?.code ?? null,
+      qrCode: qrCodeData,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -170,7 +182,7 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       success: true,
       status: "pending",
       instanceName,
-      qrCode: data?.qrcode?.code ?? null,
+      qrCode: qrCodeData,
       apiKey,
       evolutionResponse: data
     });

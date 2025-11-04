@@ -149,8 +149,9 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       success: true,
       status: "pending",
       instanceName,
-      qrCode: record.qrCode,
-      apiKey
+      qrCode: data?.qrcode?.code ?? null,
+      apiKey,
+      evolutionResponse: data
     });
   } catch (err) {
     logger.error({ err }, "Failed to create Evolution instance");

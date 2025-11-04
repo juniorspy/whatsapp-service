@@ -397,10 +397,19 @@ respuestasRef.on('child_added', (slugSnapshot) => {
         // Extract phone number from chatId: "whatsapp:+18091234567" -> "18091234567"
         const phoneNumber = chatId.replace('whatsapp:+', '');
 
+        // Get tiendaId from slug
+        const tiendaIdSnapshot = await db.ref(`/tiendas_por_slug/${slug}`).get();
+        if (!tiendaIdSnapshot.exists()) {
+          logger.warn({ slug }, "No tiendaId found for slug");
+          return;
+        }
+
+        const tiendaId = tiendaIdSnapshot.val();
+
         // Get Evolution instance details from Firebase
-        const evolutionSnapshot = await db.ref(`/tiendas/${slug}/evolution`).get();
+        const evolutionSnapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
         if (!evolutionSnapshot.exists()) {
-          logger.warn({ slug }, "No Evolution config found for tienda");
+          logger.warn({ slug, tiendaId }, "No Evolution config found for tienda");
           return;
         }
 
@@ -409,7 +418,7 @@ respuestasRef.on('child_added', (slugSnapshot) => {
         const apiKey = evolutionConfig.apiKey;
 
         if (!instanceName || !apiKey) {
-          logger.warn({ slug }, "Missing instanceName or apiKey in Evolution config");
+          logger.warn({ slug, tiendaId }, "Missing instanceName or apiKey in Evolution config");
           return;
         }
 

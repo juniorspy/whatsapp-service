@@ -92,7 +92,7 @@ const createInstance = async (instanceName, webhookUrl) => {
         enabled: true,
         url: webhookTarget,
         webhookByEvents: true,
-        events: ["messages.upsert", "qrcode.updated", "connection.update"]
+        events: ["MESSAGES_UPSERT", "QRCODE_UPDATED", "CONNECTION_UPDATE"]
       }
     },
     {

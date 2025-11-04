@@ -253,6 +253,8 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
 // Evolution Webhook Endpoint - Receives messages from WhatsApp
 // ============================================================================
 app.post("/webhook/evolution", async (req, res) => {
+  const startTime = Date.now();
+
   try {
     const { event, data, instance } = req.body;
 
@@ -325,7 +327,18 @@ app.post("/webhook/evolution", async (req, res) => {
       }
     };
 
-    // Write to Firebase /mensajes/{slug}/{chatId}
+    // RESPOND IMMEDIATELY to avoid Evolution timeout
+    res.status(200).json({
+      success: true,
+      chatId: chatId,
+      slug: slug,
+      accepted: true
+    });
+
+    const responseTime = Date.now() - startTime;
+    logger.info({ responseTime }, "Response sent to Evolution");
+
+    // Process webhook in background (after responding)
     const mensajesRef = db.ref(`/mensajes/${slug}/${chatId}`);
     const newMessageRef = await mensajesRef.push(firebaseMessage);
 
@@ -338,19 +351,15 @@ app.post("/webhook/evolution", async (req, res) => {
 
     // Cloud Functions will detect and process automatically
 
-    res.status(200).json({
-      success: true,
-      chatId: chatId,
-      slug: slug,
-      messageId: newMessageRef.key
-    });
-
   } catch (err) {
     logger.error({ err }, "Error processing Evolution webhook");
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    // Only send error response if we haven't responded yet
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
   }
 });
 

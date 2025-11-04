@@ -238,6 +238,206 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
   }
 });
 
+// ============================================================================
+// Evolution Webhook Endpoint - Receives messages from WhatsApp
+// ============================================================================
+app.post("/webhook/evolution", async (req, res) => {
+  try {
+    const { event, data, instance } = req.body;
+
+    logger.info({ event, instance }, "Received Evolution webhook");
+
+    // Filter: Only process MESSAGES_UPSERT events
+    if (event !== "messages.upsert") {
+      logger.debug({ event }, "Ignoring non-message event");
+      return res.status(200).json({
+        success: true,
+        message: "Event ignored (not messages.upsert)"
+      });
+    }
+
+    // Filter: Ignore own messages (fromMe = true)
+    if (data?.key?.fromMe === true) {
+      logger.debug("Ignoring own message");
+      return res.status(200).json({
+        success: true,
+        message: "Own message ignored"
+      });
+    }
+
+    // Extract phone number from remoteJid
+    const remoteJid = data?.key?.remoteJid;
+    if (!remoteJid) {
+      logger.warn("Missing remoteJid in webhook data");
+      return res.status(400).json({
+        success: false,
+        error: "Missing remoteJid"
+      });
+    }
+
+    const phoneNumber = remoteJid.replace('@s.whatsapp.net', '');
+    const chatId = `whatsapp:+${phoneNumber}`;
+
+    // Extract message text
+    const text = data?.message?.conversation ||
+                 data?.message?.extendedTextMessage?.text || '';
+
+    if (!text.trim()) {
+      logger.debug("Ignoring empty message");
+      return res.status(200).json({
+        success: true,
+        message: "Empty message ignored"
+      });
+    }
+
+    // Extract timestamp (Evolution uses seconds, Firebase needs milliseconds)
+    const ts = (data?.messageTimestamp ?? Math.floor(Date.now() / 1000)) * 1000;
+
+    // Extract slug from instance name: "colmado_colmado_william" -> "colmado_william"
+    const slug = instance ? instance.replace(/^colmado_/, '') : 'unknown';
+
+    // Build message in Firebase format (same as web client)
+    const firebaseMessage = {
+      role: 'user',
+      text: text,
+      ts: ts,
+      pedidoId: null, // Will be enriched by Cloud Functions
+      meta: {
+        chatId: chatId,
+        slug: slug,
+        source: 'whatsapp',
+        pushName: data?.pushName || 'Cliente',
+        remoteJid: remoteJid,
+        messageId: data?.key?.id || '',
+        firstInSession: true,
+        sessionStartTs: ts
+      }
+    };
+
+    // Write to Firebase /mensajes/{slug}/{chatId}
+    const mensajesRef = db.ref(`/mensajes/${slug}/${chatId}`);
+    const newMessageRef = await mensajesRef.push(firebaseMessage);
+
+    logger.info({
+      chatId,
+      slug,
+      messageId: newMessageRef.key,
+      text: text.substring(0, 50)
+    }, "Message written to Firebase /mensajes/");
+
+    // Cloud Functions will detect and process automatically
+
+    res.status(200).json({
+      success: true,
+      chatId: chatId,
+      slug: slug,
+      messageId: newMessageRef.key
+    });
+
+  } catch (err) {
+    logger.error({ err }, "Error processing Evolution webhook");
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// ============================================================================
+// Firebase Listener - Send bot responses via WhatsApp
+// ============================================================================
+
+// Map to track processed responses (prevent duplicates)
+const processedResponses = new Set();
+
+// Listen to all /respuestas/ nodes for WhatsApp messages
+const respuestasRef = db.ref('/respuestas');
+
+respuestasRef.on('child_added', (slugSnapshot) => {
+  const slug = slugSnapshot.key;
+
+  slugSnapshot.ref.on('child_added', (chatIdSnapshot) => {
+    const chatId = chatIdSnapshot.key;
+
+    // Only process WhatsApp chat IDs
+    if (!chatId.startsWith('whatsapp:')) {
+      return;
+    }
+
+    chatIdSnapshot.ref.on('child_added', async (responseSnapshot) => {
+      const responseId = responseSnapshot.key;
+      const responsePath = `${slug}/${chatId}/${responseId}`;
+
+      // Check if already processed
+      if (processedResponses.has(responsePath)) {
+        return;
+      }
+      processedResponses.add(responsePath);
+
+      const response = responseSnapshot.val();
+      const text = response?.text;
+
+      if (!text || typeof text !== 'string') {
+        logger.debug({ responsePath }, "Skipping response without text");
+        return;
+      }
+
+      try {
+        // Extract phone number from chatId: "whatsapp:+18091234567" -> "18091234567"
+        const phoneNumber = chatId.replace('whatsapp:+', '');
+
+        // Get Evolution instance details from Firebase
+        const evolutionSnapshot = await db.ref(`/tiendas/${slug}/evolution`).get();
+        if (!evolutionSnapshot.exists()) {
+          logger.warn({ slug }, "No Evolution config found for tienda");
+          return;
+        }
+
+        const evolutionConfig = evolutionSnapshot.val();
+        const instanceName = evolutionConfig.instanceName;
+        const apiKey = evolutionConfig.apiKey;
+
+        if (!instanceName || !apiKey) {
+          logger.warn({ slug }, "Missing instanceName or apiKey in Evolution config");
+          return;
+        }
+
+        // Send message via Evolution API
+        const sendResponse = await evolution.post(
+          `/message/sendText/${encodeURIComponent(instanceName)}`,
+          {
+            number: phoneNumber,
+            text: text
+          },
+          {
+            headers: {
+              apikey: apiKey
+            }
+          }
+        );
+
+        logger.info({
+          chatId,
+          slug,
+          phoneNumber,
+          responseId,
+          text: text.substring(0, 50)
+        }, "Message sent via WhatsApp");
+
+      } catch (err) {
+        logger.error({
+          err,
+          chatId,
+          slug,
+          responseId
+        }, "Failed to send WhatsApp message");
+      }
+    });
+  });
+});
+
+logger.info("Firebase listener initialized for /respuestas/");
+
 const port = Number.parseInt(process.env.PORT ?? "4001", 10);
 http.createServer(app).listen(port, () => {
   logger.info({ port }, "whatsapp-service listening");

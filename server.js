@@ -50,7 +50,7 @@ const connectSchema = Joi.object({
   tiendaId: Joi.string().trim().min(1).required(),
   slug: Joi.string().trim().min(1).required(),
   telefono: Joi.string().trim().min(6).required(),
-  webhookUrl: Joi.string().uri({ scheme: [/https?/i] }).required()
+  webhookUrl: Joi.string().uri({ scheme: [/https?/i] }).optional() // Optional - we use whatsapp-service webhook
 });
 
 const statusSchema = Joi.object({
@@ -75,11 +75,14 @@ const evolution = axios.create({
 
 const createInstance = async (instanceName, webhookUrl) => {
   const token = crypto.randomUUID();
-  const webhookTarget = webhookUrl ?? process.env.WEBHOOK_GLOBAL_URL;
 
-  if (!webhookTarget) {
-    throw new Error("Webhook URL is required to create an Evolution instance");
-  }
+  // Use whatsapp-service webhook endpoint (generic for all stores)
+  // The slug will be extracted from instanceName in the webhook handler
+  const webhookTarget = process.env.WHATSAPP_SERVICE_WEBHOOK_URL ??
+                       `${process.env.WHATSAPP_SERVICE_BASE_URL}/webhook/evolution` ??
+                       "https://whatsapp-service.onrpa.com/webhook/evolution";
+
+  logger.info({ instanceName, webhookTarget }, "Creating Evolution instance with whatsapp-service webhook");
 
   const response = await evolution.post(
     "/instance/create",
@@ -141,16 +144,14 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
 
   try {
     const instanceName = `colmado_${normalizeSlug(value.slug)}`;
-    const webhookTarget = value.webhookUrl || process.env.WEBHOOK_GLOBAL_URL;
 
-    if (!webhookTarget) {
-      return res.status(400).json({
-        error: "missing_webhook_url",
-        message: "Webhook URL is required. Provide webhookUrl or set WEBHOOK_GLOBAL_URL."
-      });
-    }
+    // Webhook URL now points to whatsapp-service (multi-tenant endpoint)
+    const whatsappServiceWebhook = process.env.WHATSAPP_SERVICE_WEBHOOK_URL ??
+                                   `${process.env.WHATSAPP_SERVICE_BASE_URL}/webhook/evolution` ??
+                                   "https://whatsapp-service.onrpa.com/webhook/evolution";
 
-    const { data, token } = await createInstance(instanceName, webhookTarget);
+    // Create instance with whatsapp-service webhook (not n8n)
+    const { data, token } = await createInstance(instanceName, whatsappServiceWebhook);
 
     const apiKey =
       data?.instance?.apikey ??
@@ -169,7 +170,7 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       apiKey,
       slug: value.slug,
       telefono: value.telefono,
-      webhookUrl: webhookTarget,
+      webhookUrl: whatsappServiceWebhook, // Save whatsapp-service URL
       status: "pending",
       qrCode: qrCodeData,
       createdAt: Date.now(),

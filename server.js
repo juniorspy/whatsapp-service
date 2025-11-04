@@ -208,3 +208,4 @@ const port = Number.parseInt(process.env.PORT ?? "4001", 10);
 http.createServer(app).listen(port, () => {
   logger.info({ port }, "whatsapp-service listening");
 });
+

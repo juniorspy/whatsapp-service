@@ -138,6 +138,18 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Debug endpoint - logs everything
+app.post("/webhook/evolution/debug", (req, res) => {
+  logger.info({
+    headers: req.headers,
+    body: req.body,
+    method: req.method,
+    url: req.url
+  }, "DEBUG: Received request");
+
+  res.status(200).json({ success: true, debug: true });
+});
+
 app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
   const { error, value } = connectSchema.validate(req.body, { abortEarly: false });
   if (error) {
@@ -254,11 +266,12 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
 // ============================================================================
 app.post("/webhook/evolution", async (req, res) => {
   const startTime = Date.now();
+  logger.info({ timestamp: new Date().toISOString() }, "WEBHOOK: Request arrived");
 
   try {
     const { event, data, instance } = req.body;
 
-    logger.info({ event, instance }, "Received Evolution webhook");
+    logger.info({ event, instance, bodySize: JSON.stringify(req.body).length }, "WEBHOOK: Parsed body");
 
     // Filter: Only process MESSAGES_UPSERT events
     if (event !== "messages.upsert") {

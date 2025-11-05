@@ -79,11 +79,21 @@ const createInstance = async (instanceName, webhookUrl) => {
   // Use whatsapp-service webhook endpoint (generic for all stores)
   // The slug will be extracted from instanceName in the webhook handler
   let webhookTarget;
+
+  // Priority 1: Explicit webhook URL (full URL)
   if (process.env.WHATSAPP_SERVICE_WEBHOOK_URL) {
     webhookTarget = process.env.WHATSAPP_SERVICE_WEBHOOK_URL;
-  } else if (process.env.WHATSAPP_SERVICE_BASE_URL) {
+  }
+  // Priority 2: Internal URL (for same-server deployment, avoids hairpin NAT)
+  else if (process.env.WHATSAPP_SERVICE_INTERNAL_URL) {
+    webhookTarget = `${process.env.WHATSAPP_SERVICE_INTERNAL_URL}/webhook/evolution`;
+  }
+  // Priority 3: Base URL (public)
+  else if (process.env.WHATSAPP_SERVICE_BASE_URL) {
     webhookTarget = `${process.env.WHATSAPP_SERVICE_BASE_URL}/webhook/evolution`;
-  } else {
+  }
+  // Priority 4: Fallback to public URL
+  else {
     webhookTarget = "https://whatsapp-service.onrpa.com/webhook/evolution";
   }
 

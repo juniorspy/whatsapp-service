@@ -272,6 +272,206 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
 });
 
 // ============================================================================
+// Helper Functions for Message Enrichment
+// ============================================================================
+
+/**
+ * Lookup tienda by Evolution instanceName
+ * Returns: { tiendaId, slug, telefono } or null
+ */
+const lookupTiendaByInstance = async (instanceName) => {
+  try {
+    const tiendasSnapshot = await db.ref('/tiendas').once('value');
+
+    if (!tiendasSnapshot.exists()) {
+      return null;
+    }
+
+    const tiendas = tiendasSnapshot.val();
+
+    for (const [tiendaId, tiendaData] of Object.entries(tiendas)) {
+      if (tiendaData?.evolution?.instanceName === instanceName) {
+        return {
+          tiendaId,
+          slug: tiendaData.slug || tiendaData.evolution.slug,
+          telefono: tiendaData.telefono || tiendaData.evolution.telefono
+        };
+      }
+    }
+
+    return null;
+  } catch (err) {
+    logger.error({ err, instanceName }, "Error in lookupTiendaByInstance");
+    return null;
+  }
+};
+
+/**
+ * Normalize phone number to consistent format
+ * Input: "whatsapp:+18091234567" or "18091234567@s.whatsapp.net" or "8091234567"
+ * Output: "8091234567" (10 digits, RD format)
+ */
+const normalizarTelefono = (telefono) => {
+  if (!telefono) return null;
+
+  let normalizado = telefono
+    .replace(/^whatsapp:\+/, '')
+    .replace(/@s\.whatsapp\.net$/, '')
+    .replace(/^1/, '') // Remove country code 1 (USA/RD)
+    .replace(/\D/g, ''); // Only digits
+
+  // If 10 digits and starts with 809/829/849 → RD number
+  if (normalizado.length === 10 && /^(809|829|849)/.test(normalizado)) {
+    return normalizado;
+  }
+
+  // Try to extract last 10 digits
+  if (normalizado.length > 10) {
+    return normalizado.slice(-10);
+  }
+
+  return normalizado;
+};
+
+/**
+ * Search for user by phone number
+ * Returns: { usuarioId, nombre, telefono, direccion, profileReady } or null
+ */
+const buscarUsuarioPorTelefono = async (slug, telefono) => {
+  const telefonoNormalizado = normalizarTelefono(telefono);
+
+  if (!telefonoNormalizado) {
+    return null;
+  }
+
+  try {
+    // Search in /usuarios/{slug}/
+    const usuariosRef = db.ref(`/usuarios/${slug}`);
+    const snapshot = await usuariosRef
+      .orderByChild('telefono')
+      .equalTo(telefonoNormalizado)
+      .once('value');
+
+    if (snapshot.exists()) {
+      const usuarioId = Object.keys(snapshot.val())[0];
+      const usuario = snapshot.val()[usuarioId];
+      return {
+        usuarioId,
+        nombre: usuario.nombre,
+        telefono: usuario.telefono,
+        direccion: usuario.direccion,
+        profileReady: true
+      };
+    }
+
+    // Fallback: Search in /clientes/{telefono}/ (legacy)
+    const clienteSnapshot = await db.ref(`/clientes/${telefonoNormalizado}`).once('value');
+    if (clienteSnapshot.exists()) {
+      const cliente = clienteSnapshot.val();
+      return {
+        usuarioId: null, // Legacy doesn't have usuarioId
+        nombre: cliente.nombre,
+        telefono: telefonoNormalizado,
+        direccion: cliente.direccion,
+        profileReady: true,
+        source: 'clientes_legacy'
+      };
+    }
+
+    return null;
+  } catch (err) {
+    logger.error({ err, slug, telefono }, "Error in buscarUsuarioPorTelefono");
+    return null;
+  }
+};
+
+/**
+ * Check session status and find active pedidoId
+ * Returns: { firstInSession, sessionStartTs, pedidoId, pedidoActivo }
+ */
+const checkSessionStatus = async (slug, chatId, usuarioId) => {
+  try {
+    // Check last messages in this chat
+    const mensajesRef = db.ref(`/mensajes/${slug}/${chatId}`);
+    const lastMessagesSnapshot = await mensajesRef
+      .orderByChild('ts')
+      .limitToLast(10)
+      .once('value');
+
+    if (!lastMessagesSnapshot.exists()) {
+      // No previous messages - new session
+      return {
+        firstInSession: true,
+        sessionStartTs: Date.now(),
+        pedidoId: null,
+        pedidoActivo: null
+      };
+    }
+
+    const messages = Object.values(lastMessagesSnapshot.val());
+    const lastMessage = messages[messages.length - 1];
+    const lastMessageTime = lastMessage.ts;
+    const timeSinceLastMessage = Date.now() - lastMessageTime;
+
+    // Session timeout: 30 minutes
+    const SESSION_TIMEOUT = 30 * 60 * 1000;
+
+    if (timeSinceLastMessage > SESSION_TIMEOUT) {
+      // Session expired - new session
+      return {
+        firstInSession: true,
+        sessionStartTs: Date.now(),
+        pedidoId: null,
+        pedidoActivo: null
+      };
+    }
+
+    // Active session - find sessionStartTs and pedidoId
+    let sessionStartTs = lastMessage.meta?.sessionStartTs || lastMessageTime;
+    let pedidoId = null;
+    let pedidoActivo = null;
+
+    // Look for most recent pedidoId in session
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].pedidoId) {
+        pedidoId = messages[i].pedidoId;
+
+        // Check if pedido is still active
+        const pedidoSnapshot = await db.ref(`/pedidos/${slug}/${pedidoId}`).once('value');
+        if (pedidoSnapshot.exists()) {
+          const pedido = pedidoSnapshot.val();
+          if (pedido.estado !== 'completado' && pedido.estado !== 'cancelado') {
+            pedidoActivo = pedido;
+          }
+        }
+
+        break;
+      }
+
+      if (messages[i].meta?.sessionStartTs) {
+        sessionStartTs = messages[i].meta.sessionStartTs;
+      }
+    }
+
+    return {
+      firstInSession: false,
+      sessionStartTs: sessionStartTs,
+      pedidoId: pedidoId,
+      pedidoActivo: pedidoActivo
+    };
+
+  } catch (err) {
+    logger.error({ err, slug, chatId }, "Error in checkSessionStatus");
+    return {
+      firstInSession: true,
+      sessionStartTs: Date.now(),
+      pedidoId: null,
+      pedidoActivo: null
+    };
+  }
+};
+
+// ============================================================================
 // Evolution Webhook Endpoint - Receives messages from WhatsApp
 // ============================================================================
 app.post("/webhook/evolution", async (req, res) => {
@@ -329,39 +529,79 @@ app.post("/webhook/evolution", async (req, res) => {
     // Extract timestamp (Evolution uses seconds, Firebase needs milliseconds)
     const ts = (data?.messageTimestamp ?? Math.floor(Date.now() / 1000)) * 1000;
 
-    // Extract slug from instance name: "colmado_colmado_william" -> "colmado_william"
-    const slug = instance ? instance.replace(/^colmado_/, '') : 'unknown';
-
-    // Build message in Firebase format (same as web client)
-    const firebaseMessage = {
-      role: 'user',
-      text: text,
-      ts: ts,
-      pedidoId: null, // Will be enriched by Cloud Functions
-      meta: {
-        chatId: chatId,
-        slug: slug,
-        source: 'whatsapp',
-        pushName: data?.pushName || 'Cliente',
-        remoteJid: remoteJid,
-        messageId: data?.key?.id || '',
-        firstInSession: true,
-        sessionStartTs: ts
-      }
-    };
-
     // RESPOND IMMEDIATELY to avoid Evolution timeout
     res.status(200).json({
       success: true,
       chatId: chatId,
-      slug: slug,
       accepted: true
     });
 
     const responseTime = Date.now() - startTime;
     logger.info({ responseTime }, "Response sent to Evolution");
 
-    // Process webhook in background (after responding)
+    // ========================================================================
+    // Process webhook in background (after responding) with full enrichment
+    // ========================================================================
+
+    // 1. Lookup tienda by instanceName (get real slug from Firebase)
+    const tienda = await lookupTiendaByInstance(instance);
+
+    if (!tienda) {
+      logger.error({ instance }, "Tienda not found for instanceName");
+      return;
+    }
+
+    const { slug, tiendaId } = tienda;
+
+    logger.info({ instance, slug, tiendaId }, "Tienda found");
+
+    // 2. Search user by phone number
+    const usuario = await buscarUsuarioPorTelefono(slug, phoneNumber);
+
+    logger.info({
+      phoneNumber,
+      usuarioFound: !!usuario,
+      usuarioId: usuario?.usuarioId,
+      profileReady: usuario?.profileReady
+    }, "User lookup completed");
+
+    // 3. Check session status and find active pedidoId
+    const sesion = await checkSessionStatus(slug, chatId, usuario?.usuarioId);
+
+    logger.info({
+      chatId,
+      firstInSession: sesion.firstInSession,
+      pedidoId: sesion.pedidoId,
+      pedidoActivo: !!sesion.pedidoActivo
+    }, "Session status checked");
+
+    // 4. Build enriched message (same format as web client)
+    const firebaseMessage = {
+      role: 'user',
+      text: text,
+      ts: ts,
+      pedidoId: sesion.pedidoId, // Active pedido or null
+      meta: {
+        slug: slug,
+        tiendaId: tiendaId,
+        chatId: chatId,
+        usuarioId: usuario?.usuarioId || null,
+        profileReady: usuario?.profileReady || false,
+        firstInSession: sesion.firstInSession,
+        sessionStartTs: sesion.sessionStartTs,
+        source: 'whatsapp',
+        pushName: data?.pushName || 'Cliente',
+        remoteJid: remoteJid,
+        messageId: data?.key?.id || '',
+        ...(usuario && {
+          nombre: usuario.nombre,
+          telefono: usuario.telefono,
+          direccion: usuario.direccion
+        })
+      }
+    };
+
+    // 5. Write to Firebase
     const mensajesRef = db.ref(`/mensajes/${slug}/${chatId}`);
     const newMessageRef = await mensajesRef.push(firebaseMessage);
 
@@ -369,8 +609,11 @@ app.post("/webhook/evolution", async (req, res) => {
       chatId,
       slug,
       messageId: newMessageRef.key,
-      text: text.substring(0, 50)
-    }, "Message written to Firebase /mensajes/");
+      text: text.substring(0, 50),
+      usuarioId: usuario?.usuarioId,
+      profileReady: usuario?.profileReady,
+      pedidoId: sesion.pedidoId
+    }, "Message written to Firebase with full enrichment");
 
     // Cloud Functions will detect and process automatically
 

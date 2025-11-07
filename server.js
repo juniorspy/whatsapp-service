@@ -69,7 +69,7 @@ const normalizeSlug = (slug) =>
     .replace(/^-|-$/g, "");
 
 const evolution = axios.create({
-  baseURL: process.env.EVOLUTION_BASE_URL ?? "https://evo.onrpa.com",
+  baseURL: process.env.EVOLUTION_API_URL ?? process.env.EVOLUTION_BASE_URL ?? "https://evo.onrpa.com",
   timeout: Number.parseInt(process.env.EVOLUTION_TIMEOUT ?? "45000", 10)
 });
 

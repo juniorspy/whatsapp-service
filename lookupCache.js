@@ -2,15 +2,15 @@ import admin from "firebase-admin";
 
 const cache = new Map(); // chatId → { tiendaId, usuarioId, slug, sessionStartTs, expires }
 
-// Normalize phone number: "18091234567" -> "8091234567"
+// Normalize phone number to match Firebase format: "18091234567" -> "+18091234567"
 function normalizePhone(phone) {
   if (!phone) return null;
+
+  // Remove all non-digit characters
   const digits = phone.replace(/\D/g, '');
-  // Remove country code (1 for US/DR) if present
-  if (digits.length === 11 && digits.startsWith('1')) {
-    return digits.substring(1);
-  }
-  return digits;
+
+  // Add + prefix to match Firebase storage format
+  return `+${digits}`;
 }
 
 export async function enrichWhatsAppPayload(payload) {

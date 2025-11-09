@@ -372,7 +372,8 @@ app.post("/webhook/evolution", async (req, res) => {
         messageId: data?.key?.id || '',
         firstInSession: false, // HARDCODED: Always false for WhatsApp
         sessionStartTs: ts,
-        profileReady: false
+        profileReady: false,
+        telefono: `+${phoneNumber}` // Add telefono to meta
       }
     };
 

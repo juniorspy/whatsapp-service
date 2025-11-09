@@ -51,20 +51,29 @@ export async function enrichWhatsAppPayload(payload) {
     }
   }
 
-  const profileReady = !!usuarioId;
-
+  // Check if user is a CLIENT of THIS specific store
+  let profileReady = false;
   let sessionStartTs = Date.now();
   let firstInSession = true;
-  if (usuarioId) {
-    const sessionSnap = await db
-      .ref(`/sesiones_index/${tiendaId}/${usuarioId}`)
-      .get();
-    if (sessionSnap.exists()) {
-      firstInSession = false;
-      sessionStartTs = sessionSnap.val().sessionStartTs || sessionStartTs;
-      console.log(`[CACHE] Session found for ${usuarioId}: firstInSession=false, sessionStartTs=${sessionStartTs}`);
+
+  if (usuarioId && tiendaId) {
+    const clienteSnap = await db.ref(`/tiendas/${tiendaId}/clientes/${usuarioId}`).get();
+
+    if (clienteSnap.exists()) {
+      // User is a client of this store
+      profileReady = true;
+
+      // Check session under this store's client data
+      const sesion = clienteSnap.val()?.sesion;
+      if (sesion && sesion.sessionStartTs) {
+        firstInSession = false;
+        sessionStartTs = sesion.sessionStartTs;
+        console.log(`[CACHE] Client found in store ${tiendaId}: profileReady=true, firstInSession=false, sessionStartTs=${sessionStartTs}`);
+      } else {
+        console.log(`[CACHE] Client found in store ${tiendaId}: profileReady=true, firstInSession=true (new session)`);
+      }
     } else {
-      console.log(`[CACHE] No session found for ${usuarioId}: firstInSession=true (new session)`);
+      console.log(`[CACHE] User ${usuarioId} exists globally but NOT a client of store ${tiendaId}: profileReady=false`);
     }
   } else {
     console.log(`[CACHE] No usuarioId found: profileReady=false, firstInSession=true`);

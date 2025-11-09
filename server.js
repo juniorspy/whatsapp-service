@@ -356,7 +356,7 @@ app.post("/webhook/evolution", async (req, res) => {
       chatId: chatId,
       tiendaSlug: slug,
       slug: slug, // Duplicate for compatibility
-      telefono: `+${phoneNumber}`, // Format with + prefix
+      telefono: `+${phoneNumber}`, // Format with + prefix (at root level)
       nombre: null,
       direccion: null,
       pedidoId: null,
@@ -372,13 +372,17 @@ app.post("/webhook/evolution", async (req, res) => {
         messageId: data?.key?.id || '',
         firstInSession: false, // HARDCODED: Always false for WhatsApp
         sessionStartTs: ts,
-        profileReady: false,
-        telefono: `+${phoneNumber}` // Add telefono to meta
+        profileReady: false
       }
     };
 
     // 2. Enrich payload dynamically with caching (60s TTL)
     const enrichedPayload = await enrichWhatsAppPayload(basePayload);
+
+    // DEBUG: Log complete payload being written to Firebase
+    console.log('\n========== WHATSAPP PAYLOAD TO FIREBASE ==========');
+    console.log(JSON.stringify(enrichedPayload, null, 2));
+    console.log('==================================================\n');
 
     // 3. Write enriched message to Firebase
     const mensajesRef = db.ref(`/mensajes/${slug}/${chatId}`);

@@ -62,7 +62,12 @@ export async function enrichWhatsAppPayload(payload) {
     if (sessionSnap.exists()) {
       firstInSession = false;
       sessionStartTs = sessionSnap.val().sessionStartTs || sessionStartTs;
+      console.log(`[CACHE] Session found for ${usuarioId}: firstInSession=false, sessionStartTs=${sessionStartTs}`);
+    } else {
+      console.log(`[CACHE] No session found for ${usuarioId}: firstInSession=true (new session)`);
     }
+  } else {
+    console.log(`[CACHE] No usuarioId found: profileReady=false, firstInSession=true`);
   }
 
   // Cache for 60s

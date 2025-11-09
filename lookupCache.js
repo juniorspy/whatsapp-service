@@ -1,13 +1,14 @@
 import admin from "firebase-admin";
 
-const db = admin.database();
-
 const cache = new Map(); // chatId → { tiendaId, usuarioId, slug, sessionStartTs, expires }
 
 export async function enrichWhatsAppPayload(payload) {
   const { chatId, tiendaSlug } = payload;
   const now = Date.now();
   const cached = cache.get(chatId);
+
+  // Get database reference (initialized in server.js)
+  const db = admin.database();
 
   // Reuse cache if fresh (<60s)
   if (cached && cached.expires > now) {

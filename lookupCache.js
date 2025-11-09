@@ -2,8 +2,19 @@ import admin from "firebase-admin";
 
 const cache = new Map(); // chatId → { tiendaId, usuarioId, slug, sessionStartTs, expires }
 
+// Normalize phone number: "18091234567" -> "8091234567"
+function normalizePhone(phone) {
+  if (!phone) return null;
+  const digits = phone.replace(/\D/g, '');
+  // Remove country code (1 for US/DR) if present
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.substring(1);
+  }
+  return digits;
+}
+
 export async function enrichWhatsAppPayload(payload) {
-  const { chatId, tiendaSlug } = payload;
+  const { chatId, tiendaSlug, telefono } = payload;
   const now = Date.now();
   const cached = cache.get(chatId);
 
@@ -20,14 +31,26 @@ export async function enrichWhatsAppPayload(payload) {
     return payload;
   }
 
-  // Parallel lookups
+  // Parallel lookups: tiendaId + user by chatId
   const [tiendaSnap, usuarioSnap] = await Promise.all([
     db.ref(`/tiendas_por_slug/${tiendaSlug}`).get(),
     db.ref(`/usuarios_por_identidad/${chatId}`).get(),
   ]);
 
   const tiendaId = tiendaSnap.val();
-  const usuarioId = usuarioSnap.exists() ? usuarioSnap.val() : null;
+  let usuarioId = usuarioSnap.exists() ? usuarioSnap.val() : null;
+
+  // If not found by chatId, try by phone number (cross-channel identity)
+  if (!usuarioId && telefono) {
+    const normalizedPhone = normalizePhone(telefono);
+    if (normalizedPhone) {
+      const phoneSnap = await db.ref(`/usuarios_por_telefono/${normalizedPhone}`).get();
+      if (phoneSnap.exists()) {
+        usuarioId = phoneSnap.val();
+      }
+    }
+  }
+
   const profileReady = !!usuarioId;
 
   let sessionStartTs = Date.now();

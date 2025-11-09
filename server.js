@@ -355,7 +355,8 @@ app.post("/webhook/evolution", async (req, res) => {
       ts: ts,
       chatId: chatId,
       tiendaSlug: slug,
-      telefono: phoneNumber,
+      slug: slug, // Duplicate for compatibility
+      telefono: `+${phoneNumber}`, // Format with + prefix
       nombre: null,
       direccion: null,
       pedidoId: null,

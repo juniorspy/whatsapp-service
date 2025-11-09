@@ -144,6 +144,122 @@ const fetchQr = async (instanceName, apiKey) => {
   return data?.code ?? null;
 };
 
+// ============================================================================
+// Helper Functions for Message Enrichment
+// ============================================================================
+
+/**
+ * Normaliza números de teléfono a formato consistente (solo dígitos, sin código país)
+ * Ejemplos:
+ *   "18091234567" -> "8091234567"
+ *   "whatsapp:+18091234567" -> "8091234567"
+ *   "+1 (809) 123-4567" -> "8091234567"
+ */
+const normalizarTelefono = (telefono) => {
+  if (!telefono) return null;
+
+  // Remove all non-digit characters
+  const digitsOnly = telefono.replace(/\D/g, '');
+
+  // Remove country code (1 for US/DR) if present
+  if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) {
+    return digitsOnly.substring(1);
+  }
+
+  return digitsOnly;
+};
+
+/**
+ * Busca un usuario por número de teléfono en la base de datos
+ * Busca en /usuarios/{slug}/ comparando teléfonos normalizados
+ */
+const buscarUsuarioPorTelefono = async (slug, phoneNumber) => {
+  try {
+    const normalizedSearch = normalizarTelefono(phoneNumber);
+    if (!normalizedSearch) return null;
+
+    const usuariosSnapshot = await db.ref(`/usuarios/${slug}`).get();
+    if (!usuariosSnapshot.exists()) {
+      return null;
+    }
+
+    const usuarios = usuariosSnapshot.val();
+
+    // Search through all users for matching phone number
+    for (const [chatId, userData] of Object.entries(usuarios)) {
+      const userPhone = normalizarTelefono(userData?.telefono);
+      if (userPhone === normalizedSearch) {
+        return {
+          chatId,
+          nombre: userData.nombre || null,
+          telefono: userData.telefono || null,
+          direccion: userData.direccion || null,
+          profileReady: !!(userData.nombre && userData.telefono && userData.direccion)
+        };
+      }
+    }
+
+    return null;
+  } catch (err) {
+    logger.error({ err, slug, phoneNumber }, "Error searching user by phone");
+    return null;
+  }
+};
+
+/**
+ * Verifica el estado de sesión: busca el pedido activo más reciente
+ * Retorna pedidoId si hay uno activo en los últimos 30 minutos
+ */
+const checkSessionStatus = async (slug, chatId) => {
+  try {
+    const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const now = Date.now();
+
+    // Check for active pedido
+    const pedidosSnapshot = await db.ref(`/pedidos/${slug}`).get();
+    if (!pedidosSnapshot.exists()) {
+      return { pedidoId: null, firstInSession: true, sessionStartTs: now };
+    }
+
+    const pedidos = pedidosSnapshot.val();
+    let activePedido = null;
+    let mostRecentTs = 0;
+
+    // Find most recent active pedido for this chatId
+    for (const [pedidoId, pedidoData] of Object.entries(pedidos)) {
+      if (pedidoData?.chatId === chatId &&
+          pedidoData?.estado !== 'completado' &&
+          pedidoData?.estado !== 'cancelado') {
+
+        const pedidoTs = pedidoData?.createdAt || pedidoData?.ts || 0;
+        if (pedidoTs > mostRecentTs) {
+          mostRecentTs = pedidoTs;
+          activePedido = pedidoId;
+        }
+      }
+    }
+
+    // Check if active pedido is within session timeout
+    if (activePedido && (now - mostRecentTs) < SESSION_TIMEOUT_MS) {
+      return {
+        pedidoId: activePedido,
+        firstInSession: false,
+        sessionStartTs: mostRecentTs
+      };
+    }
+
+    // No active session
+    return {
+      pedidoId: null,
+      firstInSession: true,
+      sessionStartTs: now
+    };
+  } catch (err) {
+    logger.error({ err, slug, chatId }, "Error checking session status");
+    return { pedidoId: null, firstInSession: true, sessionStartTs: Date.now() };
+  }
+};
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
@@ -332,24 +448,6 @@ app.post("/webhook/evolution", async (req, res) => {
     // Extract slug from instance name: "colmado_colmado_william" -> "colmado_william"
     const slug = instance ? instance.replace(/^colmado_/, '') : 'unknown';
 
-    // Build message in Firebase format (same as web client)
-    const firebaseMessage = {
-      role: 'user',
-      text: text,
-      ts: ts,
-      pedidoId: null, // Will be enriched by Cloud Functions
-      meta: {
-        chatId: chatId,
-        slug: slug,
-        source: 'whatsapp',
-        pushName: data?.pushName || 'Cliente',
-        remoteJid: remoteJid,
-        messageId: data?.key?.id || '',
-        firstInSession: true,
-        sessionStartTs: ts
-      }
-    };
-
     // RESPOND IMMEDIATELY to avoid Evolution timeout
     res.status(200).json({
       success: true,
@@ -361,7 +459,40 @@ app.post("/webhook/evolution", async (req, res) => {
     const responseTime = Date.now() - startTime;
     logger.info({ responseTime }, "Response sent to Evolution");
 
-    // Process webhook in background (after responding)
+    // ========================================================================
+    // Process webhook in background (after responding to avoid timeout)
+    // ========================================================================
+
+    // 1. Search for existing user by phone number (cross-channel identity)
+    const existingUser = await buscarUsuarioPorTelefono(slug, phoneNumber);
+
+    // 2. Check session status (active pedido)
+    const sessionStatus = await checkSessionStatus(slug, chatId);
+
+    // 3. Build enriched message in Firebase format (same as web client)
+    const firebaseMessage = {
+      role: 'user',
+      text: text,
+      ts: ts,
+      pedidoId: sessionStatus.pedidoId,
+      nombre: existingUser?.nombre || null,
+      telefono: existingUser?.telefono || phoneNumber,
+      direccion: existingUser?.direccion || null,
+      meta: {
+        chatId: chatId,
+        slug: slug,
+        source: 'whatsapp',
+        pushName: data?.pushName || 'Cliente',
+        remoteJid: remoteJid,
+        messageId: data?.key?.id || '',
+        firstInSession: sessionStatus.firstInSession,
+        sessionStartTs: sessionStatus.sessionStartTs,
+        profileReady: existingUser?.profileReady || false,
+        existingChatId: existingUser?.chatId || null // Original chatId if found
+      }
+    };
+
+    // 4. Write enriched message to Firebase
     const mensajesRef = db.ref(`/mensajes/${slug}/${chatId}`);
     const newMessageRef = await mensajesRef.push(firebaseMessage);
 
@@ -369,8 +500,11 @@ app.post("/webhook/evolution", async (req, res) => {
       chatId,
       slug,
       messageId: newMessageRef.key,
+      pedidoId: sessionStatus.pedidoId,
+      profileReady: firebaseMessage.meta.profileReady,
+      firstInSession: sessionStatus.firstInSession,
       text: text.substring(0, 50)
-    }, "Message written to Firebase /mensajes/");
+    }, "Enriched message written to Firebase /mensajes/");
 
     // Cloud Functions will detect and process automatically
 

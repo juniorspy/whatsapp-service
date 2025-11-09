@@ -360,7 +360,7 @@ app.post("/webhook/evolution", async (req, res) => {
       direccion: null,
       pedidoId: null,
       profileReady: false,
-      firstInSession: true,
+      firstInSession: false, // HARDCODED: Always false for WhatsApp
       sessionStartTs: ts,
       meta: {
         chatId: chatId,
@@ -369,7 +369,7 @@ app.post("/webhook/evolution", async (req, res) => {
         pushName: data?.pushName || 'Cliente',
         remoteJid: remoteJid,
         messageId: data?.key?.id || '',
-        firstInSession: true,
+        firstInSession: false, // HARDCODED: Always false for WhatsApp
         sessionStartTs: ts,
         profileReady: false
       }

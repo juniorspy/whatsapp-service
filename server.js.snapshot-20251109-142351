@@ -313,7 +313,7 @@ app.post("/webhook/evolution", async (req, res) => {
     }
 
     const phoneNumber = remoteJid.replace('@s.whatsapp.net', '');
-    const chatId = `web_${phoneNumber}`;
+    const chatId = `whatsapp:+${phoneNumber}`;
 
     // Extract message text
     const text = data?.message?.conversation ||
@@ -429,8 +429,8 @@ respuestasRef.on('child_added', (slugSnapshot) => {
   slugSnapshot.ref.on('child_added', (chatIdSnapshot) => {
     const chatId = chatIdSnapshot.key;
 
-    // Only process web_ chat IDs (WhatsApp messages formatted as web)
-    if (!chatId.startsWith('web_')) {
+    // Only process WhatsApp chat IDs
+    if (!chatId.startsWith('whatsapp:')) {
       return;
     }
 
@@ -453,8 +453,8 @@ respuestasRef.on('child_added', (slugSnapshot) => {
       }
 
       try {
-        // Extract phone number from chatId: "web_18091234567" -> "18091234567"
-        const phoneNumber = chatId.replace('web_', '');
+        // Extract phone number from chatId: "whatsapp:+18091234567" -> "18091234567"
+        const phoneNumber = chatId.replace('whatsapp:+', '');
 
         // Get tiendaId from slug
         const tiendaIdSnapshot = await db.ref(`/tiendas_por_slug/${slug}`).get();

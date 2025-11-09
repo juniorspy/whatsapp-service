@@ -8,7 +8,6 @@ import axios from "axios";
 import admin from "firebase-admin";
 import Joi from "joi";
 import pino from "pino";
-import { enrichWhatsAppPayload } from "./lookupCache.js";
 
 dotenv.config();
 
@@ -70,7 +69,7 @@ const normalizeSlug = (slug) =>
     .replace(/^-|-$/g, "");
 
 const evolution = axios.create({
-  baseURL: process.env.EVOLUTION_API_URL ?? process.env.EVOLUTION_BASE_URL ?? "https://evo.onrpa.com",
+  baseURL: process.env.EVOLUTION_BASE_URL ?? "https://evo.onrpa.com",
   timeout: Number.parseInt(process.env.EVOLUTION_TIMEOUT ?? "45000", 10)
 });
 
@@ -313,7 +312,7 @@ app.post("/webhook/evolution", async (req, res) => {
     }
 
     const phoneNumber = remoteJid.replace('@s.whatsapp.net', '');
-    const chatId = `web_${phoneNumber}`;
+    const chatId = `whatsapp:+${phoneNumber}`;
 
     // Extract message text
     const text = data?.message?.conversation ||
@@ -333,6 +332,24 @@ app.post("/webhook/evolution", async (req, res) => {
     // Extract slug from instance name: "colmado_colmado_william" -> "colmado_william"
     const slug = instance ? instance.replace(/^colmado_/, '') : 'unknown';
 
+    // Build message in Firebase format (same as web client)
+    const firebaseMessage = {
+      role: 'user',
+      text: text,
+      ts: ts,
+      pedidoId: null, // Will be enriched by Cloud Functions
+      meta: {
+        chatId: chatId,
+        slug: slug,
+        source: 'whatsapp',
+        pushName: data?.pushName || 'Cliente',
+        remoteJid: remoteJid,
+        messageId: data?.key?.id || '',
+        firstInSession: true,
+        sessionStartTs: ts
+      }
+    };
+
     // RESPOND IMMEDIATELY to avoid Evolution timeout
     res.status(200).json({
       success: true,
@@ -344,60 +361,16 @@ app.post("/webhook/evolution", async (req, res) => {
     const responseTime = Date.now() - startTime;
     logger.info({ responseTime }, "Response sent to Evolution");
 
-    // ========================================================================
-    // Process webhook in background (after responding to avoid timeout)
-    // ========================================================================
-
-    // 1. Build base payload
-    const basePayload = {
-      role: 'user',
-      text: text,
-      ts: ts,
-      chatId: chatId,
-      tiendaSlug: slug,
-      slug: slug, // Duplicate for compatibility
-      telefono: `+${phoneNumber}`, // Format with + prefix (at root level)
-      nombre: null,
-      direccion: null,
-      pedidoId: null,
-      profileReady: false,
-      firstInSession: false, // HARDCODED: Always false for WhatsApp
-      sessionStartTs: ts,
-      meta: {
-        chatId: chatId,
-        slug: slug,
-        source: 'whatsapp',
-        pushName: data?.pushName || 'Cliente',
-        remoteJid: remoteJid,
-        messageId: data?.key?.id || '',
-        firstInSession: false, // HARDCODED: Always false for WhatsApp
-        sessionStartTs: ts,
-        profileReady: false
-      }
-    };
-
-    // 2. Enrich payload dynamically with caching (60s TTL)
-    const enrichedPayload = await enrichWhatsAppPayload(basePayload);
-
-    // DEBUG: Log complete payload being written to Firebase
-    console.log('\n========== WHATSAPP PAYLOAD TO FIREBASE ==========');
-    console.log(JSON.stringify(enrichedPayload, null, 2));
-    console.log('==================================================\n');
-
-    // 3. Write enriched message to Firebase
+    // Process webhook in background (after responding)
     const mensajesRef = db.ref(`/mensajes/${slug}/${chatId}`);
-    const newMessageRef = await mensajesRef.push(enrichedPayload);
+    const newMessageRef = await mensajesRef.push(firebaseMessage);
 
     logger.info({
       chatId,
       slug,
       messageId: newMessageRef.key,
-      tiendaId: enrichedPayload.tiendaId,
-      profileReady: enrichedPayload.meta.profileReady,
-      firstInSession: enrichedPayload.meta.firstInSession,
-      sessionStartTs: enrichedPayload.sessionStartTs,
       text: text.substring(0, 50)
-    }, "Enriched message written to Firebase /mensajes/ (with cache)");
+    }, "Message written to Firebase /mensajes/");
 
     // Cloud Functions will detect and process automatically
 
@@ -429,8 +402,8 @@ respuestasRef.on('child_added', (slugSnapshot) => {
   slugSnapshot.ref.on('child_added', (chatIdSnapshot) => {
     const chatId = chatIdSnapshot.key;
 
-    // Only process web_ chat IDs (WhatsApp messages formatted as web)
-    if (!chatId.startsWith('web_')) {
+    // Only process WhatsApp chat IDs
+    if (!chatId.startsWith('whatsapp:')) {
       return;
     }
 
@@ -453,8 +426,8 @@ respuestasRef.on('child_added', (slugSnapshot) => {
       }
 
       try {
-        // Extract phone number from chatId: "web_18091234567" -> "18091234567"
-        const phoneNumber = chatId.replace('web_', '');
+        // Extract phone number from chatId: "whatsapp:+18091234567" -> "18091234567"
+        const phoneNumber = chatId.replace('whatsapp:+', '');
 
         // Get tiendaId from slug
         const tiendaIdSnapshot = await db.ref(`/tiendas_por_slug/${slug}`).get();

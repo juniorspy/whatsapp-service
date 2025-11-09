@@ -8,6 +8,7 @@ import axios from "axios";
 import admin from "firebase-admin";
 import Joi from "joi";
 import pino from "pino";
+import { enrichWhatsAppPayload } from "./lookupCache.js";
 
 dotenv.config();
 
@@ -142,122 +143,6 @@ const fetchQr = async (instanceName, apiKey) => {
       : `data:image/png;base64,${data.base64}`;
   }
   return data?.code ?? null;
-};
-
-// ============================================================================
-// Helper Functions for Message Enrichment
-// ============================================================================
-
-/**
- * Normaliza números de teléfono a formato consistente (solo dígitos, sin código país)
- * Ejemplos:
- *   "18091234567" -> "8091234567"
- *   "whatsapp:+18091234567" -> "8091234567"
- *   "+1 (809) 123-4567" -> "8091234567"
- */
-const normalizarTelefono = (telefono) => {
-  if (!telefono) return null;
-
-  // Remove all non-digit characters
-  const digitsOnly = telefono.replace(/\D/g, '');
-
-  // Remove country code (1 for US/DR) if present
-  if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) {
-    return digitsOnly.substring(1);
-  }
-
-  return digitsOnly;
-};
-
-/**
- * Busca un usuario por número de teléfono en la base de datos
- * Busca en /usuarios/{slug}/ comparando teléfonos normalizados
- */
-const buscarUsuarioPorTelefono = async (slug, phoneNumber) => {
-  try {
-    const normalizedSearch = normalizarTelefono(phoneNumber);
-    if (!normalizedSearch) return null;
-
-    const usuariosSnapshot = await db.ref(`/usuarios/${slug}`).get();
-    if (!usuariosSnapshot.exists()) {
-      return null;
-    }
-
-    const usuarios = usuariosSnapshot.val();
-
-    // Search through all users for matching phone number
-    for (const [chatId, userData] of Object.entries(usuarios)) {
-      const userPhone = normalizarTelefono(userData?.telefono);
-      if (userPhone === normalizedSearch) {
-        return {
-          chatId,
-          nombre: userData.nombre || null,
-          telefono: userData.telefono || null,
-          direccion: userData.direccion || null,
-          profileReady: !!(userData.nombre && userData.telefono && userData.direccion)
-        };
-      }
-    }
-
-    return null;
-  } catch (err) {
-    logger.error({ err, slug, phoneNumber }, "Error searching user by phone");
-    return null;
-  }
-};
-
-/**
- * Verifica el estado de sesión: busca el pedido activo más reciente
- * Retorna pedidoId si hay uno activo en los últimos 30 minutos
- */
-const checkSessionStatus = async (slug, chatId) => {
-  try {
-    const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-    const now = Date.now();
-
-    // Check for active pedido
-    const pedidosSnapshot = await db.ref(`/pedidos/${slug}`).get();
-    if (!pedidosSnapshot.exists()) {
-      return { pedidoId: null, firstInSession: true, sessionStartTs: now };
-    }
-
-    const pedidos = pedidosSnapshot.val();
-    let activePedido = null;
-    let mostRecentTs = 0;
-
-    // Find most recent active pedido for this chatId
-    for (const [pedidoId, pedidoData] of Object.entries(pedidos)) {
-      if (pedidoData?.chatId === chatId &&
-          pedidoData?.estado !== 'completado' &&
-          pedidoData?.estado !== 'cancelado') {
-
-        const pedidoTs = pedidoData?.createdAt || pedidoData?.ts || 0;
-        if (pedidoTs > mostRecentTs) {
-          mostRecentTs = pedidoTs;
-          activePedido = pedidoId;
-        }
-      }
-    }
-
-    // Check if active pedido is within session timeout
-    if (activePedido && (now - mostRecentTs) < SESSION_TIMEOUT_MS) {
-      return {
-        pedidoId: activePedido,
-        firstInSession: false,
-        sessionStartTs: mostRecentTs
-      };
-    }
-
-    // No active session
-    return {
-      pedidoId: null,
-      firstInSession: true,
-      sessionStartTs: now
-    };
-  } catch (err) {
-    logger.error({ err, slug, chatId }, "Error checking session status");
-    return { pedidoId: null, firstInSession: true, sessionStartTs: Date.now() };
-  }
 };
 
 app.get("/health", (_req, res) => {
@@ -463,21 +348,20 @@ app.post("/webhook/evolution", async (req, res) => {
     // Process webhook in background (after responding to avoid timeout)
     // ========================================================================
 
-    // 1. Search for existing user by phone number (cross-channel identity)
-    const existingUser = await buscarUsuarioPorTelefono(slug, phoneNumber);
-
-    // 2. Check session status (active pedido)
-    const sessionStatus = await checkSessionStatus(slug, chatId);
-
-    // 3. Build enriched message in Firebase format (same as web client)
-    const firebaseMessage = {
+    // 1. Build base payload
+    const basePayload = {
       role: 'user',
       text: text,
       ts: ts,
-      pedidoId: sessionStatus.pedidoId,
-      nombre: existingUser?.nombre || null,
-      telefono: existingUser?.telefono || phoneNumber,
-      direccion: existingUser?.direccion || null,
+      chatId: chatId,
+      tiendaSlug: slug,
+      telefono: phoneNumber,
+      nombre: null,
+      direccion: null,
+      pedidoId: null,
+      profileReady: false,
+      firstInSession: true,
+      sessionStartTs: ts,
       meta: {
         chatId: chatId,
         slug: slug,
@@ -485,26 +369,29 @@ app.post("/webhook/evolution", async (req, res) => {
         pushName: data?.pushName || 'Cliente',
         remoteJid: remoteJid,
         messageId: data?.key?.id || '',
-        firstInSession: sessionStatus.firstInSession,
-        sessionStartTs: sessionStatus.sessionStartTs,
-        profileReady: existingUser?.profileReady || false,
-        existingChatId: existingUser?.chatId || null // Original chatId if found
+        firstInSession: true,
+        sessionStartTs: ts,
+        profileReady: false
       }
     };
 
-    // 4. Write enriched message to Firebase
+    // 2. Enrich payload dynamically with caching (60s TTL)
+    const enrichedPayload = await enrichWhatsAppPayload(basePayload);
+
+    // 3. Write enriched message to Firebase
     const mensajesRef = db.ref(`/mensajes/${slug}/${chatId}`);
-    const newMessageRef = await mensajesRef.push(firebaseMessage);
+    const newMessageRef = await mensajesRef.push(enrichedPayload);
 
     logger.info({
       chatId,
       slug,
       messageId: newMessageRef.key,
-      pedidoId: sessionStatus.pedidoId,
-      profileReady: firebaseMessage.meta.profileReady,
-      firstInSession: sessionStatus.firstInSession,
+      tiendaId: enrichedPayload.tiendaId,
+      profileReady: enrichedPayload.meta.profileReady,
+      firstInSession: enrichedPayload.meta.firstInSession,
+      sessionStartTs: enrichedPayload.sessionStartTs,
       text: text.substring(0, 50)
-    }, "Enriched message written to Firebase /mensajes/");
+    }, "Enriched message written to Firebase /mensajes/ (with cache)");
 
     // Cloud Functions will detect and process automatically
 

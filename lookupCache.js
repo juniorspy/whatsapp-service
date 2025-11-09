@@ -54,7 +54,7 @@ export async function enrichWhatsAppPayload(payload) {
   // Check if user is a CLIENT of THIS specific store
   let profileReady = false;
   let sessionStartTs = Date.now();
-  let firstInSession = true;
+  let firstInSession = false; // HARDCODED: Always false for WhatsApp
 
   if (usuarioId && tiendaId) {
     const clienteSnap = await db.ref(`/tiendas/${tiendaId}/clientes/${usuarioId}`).get();

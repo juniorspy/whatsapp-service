@@ -79,21 +79,15 @@ export async function enrichWhatsAppPayload(payload) {
     console.log(`[CACHE] No usuarioId found: profileReady=false, firstInSession=true`);
   }
 
-  // Only cache when user IS a client (profileReady=true)
-  // This ensures new registrations are detected on next message
-  if (profileReady) {
-    cache.set(chatId, {
-      tiendaId,
-      usuarioId,
-      slug: tiendaSlug,
-      sessionStartTs,
-      profileReady,
-      expires: now + 60_000,
-    });
-    console.log(`[CACHE] Cached profileReady=true for ${chatId} (60s TTL)`);
-  } else {
-    console.log(`[CACHE] NOT caching profileReady=false for ${chatId} (will recheck next time)`);
-  }
+  // Cache for 60s
+  cache.set(chatId, {
+    tiendaId,
+    usuarioId,
+    slug: tiendaSlug,
+    sessionStartTs,
+    profileReady,
+    expires: now + 60_000,
+  });
 
   // Inject data into payload
   payload.tiendaId = tiendaId;

@@ -420,29 +420,6 @@ app.post("/webhook/evolution", async (req, res) => {
 // Map to track processed responses (prevent duplicates)
 const processedResponses = new Set();
 
-// Helper function: Retry with exponential backoff
-async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (attempt === maxRetries) {
-        throw error; // Last attempt failed, throw error
-      }
-
-      const delay = delayMs * Math.pow(2, attempt - 1); // Exponential backoff: 1s, 2s, 4s
-      logger.warn({
-        attempt,
-        maxRetries,
-        delayMs: delay,
-        error: error.message
-      }, `Retry attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms`);
-
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-}
-
 // Listen to all /respuestas/ nodes for WhatsApp messages
 const respuestasRef = db.ref('/respuestas');
 
@@ -504,21 +481,19 @@ respuestasRef.on('child_added', (slugSnapshot) => {
           return;
         }
 
-        // Send message via Evolution API with retry logic (3 attempts)
-        const sendResponse = await retryWithBackoff(async () => {
-          return await evolution.post(
-            `/message/sendText/${encodeURIComponent(instanceName)}`,
-            {
-              number: phoneNumber,
-              text: text
-            },
-            {
-              headers: {
-                apikey: apiKey
-              }
+        // Send message via Evolution API
+        const sendResponse = await evolution.post(
+          `/message/sendText/${encodeURIComponent(instanceName)}`,
+          {
+            number: phoneNumber,
+            text: text
+          },
+          {
+            headers: {
+              apikey: apiKey
             }
-          );
-        }, 3, 1000);
+          }
+        );
 
         logger.info({
           chatId,

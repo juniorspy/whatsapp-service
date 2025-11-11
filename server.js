@@ -498,6 +498,10 @@ app.post("/webhook/evolution", async (req, res) => {
 // Map to track processed responses (prevent duplicates)
 const processedResponses = new Set();
 
+// Service startup timestamp - only process messages created AFTER this
+const serviceStartupTime = Date.now();
+logger.info({ serviceStartupTime, time: new Date(serviceStartupTime).toISOString() }, "Service started - will only process new messages");
+
 // Helper function: Retry with exponential backoff
 async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -553,6 +557,24 @@ respuestasRef.on('child_added', (slugSnapshot) => {
         return;
       }
 
+      // PROTECTION 1: Skip if already marked as sent
+      if (response.enviado === true) {
+        logger.debug({ responsePath }, "Skipping response already marked as sent");
+        return;
+      }
+
+      // PROTECTION 2: Skip if message is older than service startup (prevents resending on restart)
+      const messageTimestamp = response.ts || 0;
+      if (messageTimestamp < serviceStartupTime) {
+        logger.debug({
+          responsePath,
+          messageTimestamp,
+          serviceStartupTime,
+          diff: serviceStartupTime - messageTimestamp
+        }, "Skipping old message from before service restart");
+        return;
+      }
+
       try {
         // Extract phone number from chatId: "web_18091234567" -> "18091234567"
         const phoneNumber = chatId.replace('web_', '');
@@ -605,6 +627,12 @@ respuestasRef.on('child_added', (slugSnapshot) => {
           responseId,
           text: text.substring(0, 50)
         }, "Message sent via WhatsApp");
+
+        // Mark message as sent in Firebase (prevents duplicate sends on restart)
+        await responseSnapshot.ref.update({
+          enviado: true,
+          enviadoEn: Date.now()
+        });
 
       } catch (err) {
         logger.error({

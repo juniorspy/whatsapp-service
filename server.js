@@ -315,16 +315,38 @@ app.post("/webhook/evolution", async (req, res) => {
     const phoneNumber = remoteJid.replace('@s.whatsapp.net', '');
     const chatId = `web_${phoneNumber}`;
 
-    // Extract message text
-    const text = data?.message?.conversation ||
-                 data?.message?.extendedTextMessage?.text || '';
+    // Detect message type and extract content
+    let messageType = 'text';
+    let text = '';
+    let audioData = null;
 
-    if (!text.trim()) {
-      logger.debug("Ignoring empty message");
-      return res.status(200).json({
-        success: true,
-        message: "Empty message ignored"
-      });
+    // Check for audio/voice note
+    const audioMessage = data?.message?.audioMessage;
+    if (audioMessage) {
+      messageType = 'audio';
+      audioData = {
+        url: audioMessage.url || null,
+        mimetype: audioMessage.mimetype || 'audio/ogg',
+        seconds: audioMessage.seconds || 0,
+        ptt: audioMessage.ptt || false, // Push-to-talk (voice note)
+        fileLength: audioMessage.fileLength || null,
+        mediaKey: audioMessage.mediaKey || null,
+        fileSha256: audioMessage.fileSha256 || null
+      };
+      text = `[Audio message - ${audioData.seconds}s]`; // Placeholder text for logs
+      logger.info({ chatId, audioData }, "Audio message detected");
+    } else {
+      // Extract text message
+      text = data?.message?.conversation ||
+             data?.message?.extendedTextMessage?.text || '';
+
+      if (!text.trim()) {
+        logger.debug("Ignoring empty message");
+        return res.status(200).json({
+          success: true,
+          message: "Empty message ignored"
+        });
+      }
     }
 
     // Extract timestamp (Evolution uses seconds, Firebase needs milliseconds)
@@ -352,6 +374,7 @@ app.post("/webhook/evolution", async (req, res) => {
     const basePayload = {
       role: 'user',
       text: text,
+      messageType: messageType, // 'text' or 'audio'
       ts: ts,
       chatId: chatId,
       tiendaSlug: slug,
@@ -372,9 +395,16 @@ app.post("/webhook/evolution", async (req, res) => {
         messageId: data?.key?.id || '',
         firstInSession: false, // HARDCODED: Always false for WhatsApp
         sessionStartTs: ts,
-        profileReady: false
+        profileReady: false,
+        messageType: messageType
       }
     };
+
+    // Add audio data if present
+    if (audioData) {
+      basePayload.audio = audioData;
+      basePayload.meta.audio = audioData;
+    }
 
     // 2. Enrich payload dynamically with caching (60s TTL)
     const enrichedPayload = await enrichWhatsAppPayload(basePayload);
@@ -392,11 +422,13 @@ app.post("/webhook/evolution", async (req, res) => {
       chatId,
       slug,
       messageId: newMessageRef.key,
+      messageType: messageType,
       tiendaId: enrichedPayload.tiendaId,
       profileReady: enrichedPayload.meta.profileReady,
       firstInSession: enrichedPayload.meta.firstInSession,
       sessionStartTs: enrichedPayload.sessionStartTs,
-      text: text.substring(0, 50)
+      text: text.substring(0, 50),
+      hasAudio: audioData !== null
     }, "Enriched message written to Firebase /mensajes/ (with cache)");
 
     // Cloud Functions will detect and process automatically

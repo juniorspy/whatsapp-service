@@ -324,8 +324,46 @@ app.post("/webhook/evolution", async (req, res) => {
     const audioMessage = data?.message?.audioMessage;
     if (audioMessage) {
       messageType = 'audio';
+
+      // Download audio as base64 from Evolution API
+      let audioBase64 = null;
+      try {
+        // Get instance config to retrieve API key
+        const instanceConfig = await db.ref(`/evolution_instances/${instance}`).once('value');
+        const apiKey = instanceConfig.val()?.apiKey;
+
+        if (apiKey && data?.key?.id) {
+          logger.info({ instance, messageId: data.key.id }, "Downloading audio from Evolution API");
+
+          const mediaResponse = await evolution.post(
+            `/chat/getBase64FromMediaMessage/${encodeURIComponent(instance)}`,
+            {
+              message: {
+                key: {
+                  id: data.key.id
+                }
+              }
+            },
+            {
+              headers: {
+                apikey: apiKey
+              },
+              timeout: 30000 // 30 second timeout for media download
+            }
+          );
+
+          audioBase64 = mediaResponse.data?.base64 || null;
+          logger.info({ hasBase64: !!audioBase64 }, "Audio download completed");
+        } else {
+          logger.warn({ instance }, "Cannot download audio: missing API key or message ID");
+        }
+      } catch (downloadError) {
+        logger.error({ err: downloadError, instance }, "Failed to download audio from Evolution API");
+      }
+
       audioData = {
         url: audioMessage.url || null,
+        base64: audioBase64, // Downloaded base64 audio
         mimetype: audioMessage.mimetype || 'audio/ogg',
         seconds: audioMessage.seconds || 0,
         ptt: audioMessage.ptt || false, // Push-to-talk (voice note)
@@ -334,7 +372,7 @@ app.post("/webhook/evolution", async (req, res) => {
         fileSha256: audioMessage.fileSha256 || null
       };
       text = `[Audio message - ${audioData.seconds}s]`; // Placeholder text for logs
-      logger.info({ chatId, audioData }, "Audio message detected");
+      logger.info({ chatId, audioData: { ...audioData, base64: audioBase64 ? '[REDACTED]' : null } }, "Audio message detected");
     } else {
       // Extract text message
       text = data?.message?.conversation ||

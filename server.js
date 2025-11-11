@@ -212,6 +212,14 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
 
     await db.ref(`/tiendas/${value.tiendaId}/evolution`).set(record);
 
+    // Create reverse lookup: instanceName -> tiendaId + apiKey (for webhook handler)
+    await db.ref(`/evolution_instances/${instanceName}`).set({
+      tiendaId: value.tiendaId,
+      apiKey: apiKey,
+      slug: value.slug,
+      createdAt: Date.now()
+    });
+
     res.status(201).json({
       success: true,
       status: "pending",

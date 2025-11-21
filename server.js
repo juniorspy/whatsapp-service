@@ -62,6 +62,16 @@ const statusSchema = Joi.object({
     .default(false)
 });
 
+const addNumberSchema = Joi.object({
+  tiendaId: Joi.string().trim().min(1).required(),
+  slug: Joi.string().trim().min(1).required(),
+  telefono: Joi.string().trim().min(6).required()
+});
+
+const listNumbersSchema = Joi.object({
+  tiendaId: Joi.string().trim().min(1).required()
+});
+
 const normalizeSlug = (slug) =>
   slug
     .toLowerCase()
@@ -281,6 +291,230 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
 });
 
 // ============================================================================
+// Multi-Number Endpoints - Add and list additional WhatsApp numbers
+// ============================================================================
+
+// Add a new WhatsApp number to an existing store
+app.post("/api/v1/whatsapp/add-number", async (req, res) => {
+  const { error, value } = addNumberSchema.validate(req.body, { abortEarly: false });
+  if (error) {
+    return res.status(400).json({
+      error: "validation_error",
+      details: error.details.map((detail) => detail.message)
+    });
+  }
+
+  try {
+    const baseInstanceName = `colmado_${normalizeSlug(value.slug)}`;
+
+    // Find next available number suffix
+    const existingNumbers = await db.ref(`/tiendas/${value.tiendaId}/whatsapp_numbers`).get();
+    let nextSuffix = 2;
+
+    if (existingNumbers.exists()) {
+      const numbers = existingNumbers.val();
+      const suffixes = Object.values(numbers)
+        .map(n => {
+          const match = n.instanceName?.match(/_(\d+)$/);
+          return match ? parseInt(match[1], 10) : 1;
+        })
+        .filter(s => !isNaN(s));
+
+      if (suffixes.length > 0) {
+        nextSuffix = Math.max(...suffixes) + 1;
+      }
+    }
+
+    const instanceName = `${baseInstanceName}_${nextSuffix}`;
+
+    // Determine webhook URL
+    let whatsappServiceWebhook;
+    if (process.env.WHATSAPP_SERVICE_WEBHOOK_URL) {
+      whatsappServiceWebhook = process.env.WHATSAPP_SERVICE_WEBHOOK_URL;
+    } else if (process.env.WHATSAPP_SERVICE_BASE_URL) {
+      whatsappServiceWebhook = `${process.env.WHATSAPP_SERVICE_BASE_URL}/webhook/evolution`;
+    } else {
+      whatsappServiceWebhook = "https://whatsapp-service.onrpa.com/webhook/evolution";
+    }
+
+    // Create Evolution instance
+    const { data, token } = await createInstance(instanceName, whatsappServiceWebhook);
+
+    const apiKey =
+      data?.instance?.apikey ??
+      data?.hash?.apikey ??
+      (typeof data?.hash === "string" ? data.hash : null) ??
+      token;
+
+    const qrCodeData = data?.qrcode?.base64
+      ? (data.qrcode.base64.startsWith('data:')
+          ? data.qrcode.base64
+          : `data:image/png;base64,${data.qrcode.base64}`)
+      : (data?.qrcode?.code ?? null);
+
+    const numberId = `number_${nextSuffix}`;
+    const record = {
+      instanceName,
+      apiKey,
+      slug: value.slug,
+      telefono: value.telefono,
+      webhookUrl: whatsappServiceWebhook,
+      status: "pending",
+      qrCode: qrCodeData,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    // Save to whatsapp_numbers collection
+    await db.ref(`/tiendas/${value.tiendaId}/whatsapp_numbers/${numberId}`).set(record);
+
+    // Create reverse lookup for webhook handler
+    await db.ref(`/evolution_instances/${instanceName}`).set({
+      tiendaId: value.tiendaId,
+      apiKey: apiKey,
+      slug: value.slug,
+      numberId: numberId,
+      createdAt: Date.now()
+    });
+
+    logger.info({ tiendaId: value.tiendaId, instanceName, numberId }, "Additional WhatsApp number created");
+
+    res.status(201).json({
+      success: true,
+      status: "pending",
+      instanceName,
+      numberId,
+      qrCode: qrCodeData,
+      apiKey
+    });
+  } catch (err) {
+    logger.error({ err }, "Failed to create additional WhatsApp number");
+    res.status(502).json({ error: "evolution_error", message: err.message });
+  }
+});
+
+// List all WhatsApp numbers for a store
+app.get("/api/v1/whatsapp/numbers", async (req, res) => {
+  const { error, value } = listNumbersSchema.validate(req.query, { convert: true });
+  if (error) {
+    return res.status(400).json({
+      error: "validation_error",
+      details: error.details.map((detail) => detail.message)
+    });
+  }
+
+  try {
+    const numbers = [];
+
+    // Get primary number from /evolution
+    const primarySnapshot = await db.ref(`/tiendas/${value.tiendaId}/evolution`).get();
+    if (primarySnapshot.exists()) {
+      const primary = primarySnapshot.val();
+      const state = await fetchStatus(primary.instanceName, primary.apiKey).catch(() => null);
+      numbers.push({
+        numberId: "primary",
+        instanceName: primary.instanceName,
+        telefono: primary.telefono,
+        status: state?.instance?.connectionStatus === "open" ? "connected" : (primary.status || "pending"),
+        profileName: state?.instance?.profileName ?? null,
+        isPrimary: true,
+        createdAt: primary.createdAt
+      });
+    }
+
+    // Get additional numbers from /whatsapp_numbers
+    const additionalSnapshot = await db.ref(`/tiendas/${value.tiendaId}/whatsapp_numbers`).get();
+    if (additionalSnapshot.exists()) {
+      const additionalNumbers = additionalSnapshot.val();
+      for (const [numberId, config] of Object.entries(additionalNumbers)) {
+        const state = await fetchStatus(config.instanceName, config.apiKey).catch(() => null);
+        numbers.push({
+          numberId,
+          instanceName: config.instanceName,
+          telefono: config.telefono,
+          status: state?.instance?.connectionStatus === "open" ? "connected" : (config.status || "pending"),
+          profileName: state?.instance?.profileName ?? null,
+          isPrimary: false,
+          createdAt: config.createdAt
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      count: numbers.length,
+      numbers
+    });
+  } catch (err) {
+    logger.error({ err }, "Failed to list WhatsApp numbers");
+    res.status(502).json({ error: "evolution_error", message: err.message });
+  }
+});
+
+// Get status/QR for a specific additional number
+app.get("/api/v1/whatsapp/numbers/:numberId/status", async (req, res) => {
+  const tiendaId = req.query.tiendaId;
+  const numberId = req.params.numberId;
+  const includeQr = req.query.includeQr === "true";
+
+  if (!tiendaId) {
+    return res.status(400).json({ error: "validation_error", message: "tiendaId is required" });
+  }
+
+  try {
+    let config;
+
+    if (numberId === "primary") {
+      const snapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
+      if (!snapshot.exists()) {
+        return res.status(404).json({ error: "not_found", message: "Primary number not found" });
+      }
+      config = snapshot.val();
+    } else {
+      const snapshot = await db.ref(`/tiendas/${tiendaId}/whatsapp_numbers/${numberId}`).get();
+      if (!snapshot.exists()) {
+        return res.status(404).json({ error: "not_found", message: "Number not found" });
+      }
+      config = snapshot.val();
+    }
+
+    const state = await fetchStatus(config.instanceName, config.apiKey);
+    const connectionStatus = state?.instance?.connectionStatus ?? "close";
+
+    let qrCode = config.qrCode;
+    if (includeQr && connectionStatus !== "open") {
+      qrCode = await fetchQr(config.instanceName, config.apiKey);
+    }
+
+    // Update status in Firebase
+    const updatePath = numberId === "primary"
+      ? `/tiendas/${tiendaId}/evolution`
+      : `/tiendas/${tiendaId}/whatsapp_numbers/${numberId}`;
+
+    await db.ref(updatePath).update({
+      status: connectionStatus === "open" ? "connected" : "pending",
+      qrCode,
+      lastSyncedAt: Date.now(),
+      connectionStatus
+    });
+
+    res.json({
+      success: true,
+      numberId,
+      status: connectionStatus === "open" ? "connected" : "pending",
+      instanceName: config.instanceName,
+      connectionStatus,
+      number: state?.instance?.number ?? null,
+      profileName: state?.instance?.profileName ?? null,
+      qrCode: includeQr ? qrCode : undefined
+    });
+  } catch (err) {
+    logger.error({ err, numberId }, "Failed to fetch number status");
+    res.status(502).json({ error: "evolution_error", message: err.message });
+  }
+});
+
+// ============================================================================
 // Evolution Webhook Endpoint - Receives messages from WhatsApp
 // ============================================================================
 app.post("/webhook/evolution", async (req, res) => {
@@ -399,7 +633,8 @@ app.post("/webhook/evolution", async (req, res) => {
     const ts = (data?.messageTimestamp ?? Math.floor(Date.now() / 1000)) * 1000;
 
     // Extract slug from instance name: "colmado_colmado_william" -> "colmado_william"
-    const slug = instance ? instance.replace(/^colmado_/, '') : 'unknown';
+    // Also strip _2, _3, etc. suffix for multi-number instances
+    const slug = instance ? instance.replace(/^colmado_/, '').replace(/_\d+$/, '') : 'unknown';
 
     // RESPOND IMMEDIATELY to avoid Evolution timeout
     res.status(200).json({
@@ -426,6 +661,7 @@ app.post("/webhook/evolution", async (req, res) => {
       tiendaSlug: slug,
       slug: slug, // Duplicate for compatibility
       telefono: `+${phoneNumber}`, // Format with + prefix (at root level)
+      instanceName: instance, // Track which WhatsApp number received this message
       nombre: null,
       direccion: null,
       pedidoId: null,
@@ -439,12 +675,19 @@ app.post("/webhook/evolution", async (req, res) => {
         pushName: data?.pushName || 'Cliente',
         remoteJid: remoteJid,
         messageId: data?.key?.id || '',
+        instanceName: instance, // Track which WhatsApp number received this message
         firstInSession: false, // HARDCODED: Always false for WhatsApp
         sessionStartTs: ts,
         profileReady: false,
         messageType: messageType
       }
     };
+
+    // Save chat-to-instance mapping for response routing
+    await db.ref(`/chat_instances/${slug}/${chatId}`).set({
+      instanceName: instance,
+      lastMessageAt: ts
+    });
 
     // Add audio data if present
     if (audioData) {
@@ -588,16 +831,37 @@ respuestasRef.on('child_added', (slugSnapshot) => {
 
         const tiendaId = tiendaIdSnapshot.val();
 
-        // Get Evolution instance details from Firebase
-        const evolutionSnapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
-        if (!evolutionSnapshot.exists()) {
-          logger.warn({ slug, tiendaId }, "No Evolution config found for tienda");
-          return;
+        // Check chat-to-instance mapping to find which number received the original message
+        let instanceName = null;
+        let apiKey = null;
+
+        const chatInstanceSnapshot = await db.ref(`/chat_instances/${slug}/${chatId}`).get();
+        if (chatInstanceSnapshot.exists()) {
+          const chatInstance = chatInstanceSnapshot.val();
+          const mappedInstanceName = chatInstance.instanceName;
+
+          // Look up instance in /evolution_instances/ (reverse lookup)
+          const instanceLookup = await db.ref(`/evolution_instances/${mappedInstanceName}`).get();
+          if (instanceLookup.exists()) {
+            instanceName = mappedInstanceName;
+            apiKey = instanceLookup.val().apiKey;
+            logger.debug({ slug, chatId, instanceName }, "Using mapped instance for response");
+          }
         }
 
-        const evolutionConfig = evolutionSnapshot.val();
-        const instanceName = evolutionConfig.instanceName;
-        const apiKey = evolutionConfig.apiKey;
+        // Fallback: Use primary /evolution config if no mapping found
+        if (!instanceName || !apiKey) {
+          const evolutionSnapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
+          if (!evolutionSnapshot.exists()) {
+            logger.warn({ slug, tiendaId }, "No Evolution config found for tienda");
+            return;
+          }
+
+          const evolutionConfig = evolutionSnapshot.val();
+          instanceName = evolutionConfig.instanceName;
+          apiKey = evolutionConfig.apiKey;
+          logger.debug({ slug, chatId, instanceName }, "Using primary instance for response (no mapping)");
+        }
 
         if (!instanceName || !apiKey) {
           logger.warn({ slug, tiendaId }, "Missing instanceName or apiKey in Evolution config");

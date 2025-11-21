@@ -821,6 +821,21 @@ respuestasRef.on('child_added', (slugSnapshot) => {
         return;
       }
 
+      // PROTECTION 3: Use Firebase transaction to atomically claim this message
+      // This prevents race conditions when multiple service instances are running
+      const claimResult = await responseSnapshot.ref.child('enviado').transaction((currentValue) => {
+        if (currentValue === true) {
+          // Already claimed by another instance, abort
+          return; // returning undefined aborts the transaction
+        }
+        return true; // Claim it
+      });
+
+      if (!claimResult.committed) {
+        logger.debug({ responsePath }, "Message already claimed by another instance (transaction aborted)");
+        return;
+      }
+
       try {
         // Extract phone number from chatId: "web_18091234567" -> "18091234567"
         const phoneNumber = chatId.replace('web_', '');
@@ -895,9 +910,8 @@ respuestasRef.on('child_added', (slugSnapshot) => {
           text: text.substring(0, 50)
         }, "Message sent via WhatsApp");
 
-        // Mark message as sent in Firebase (prevents duplicate sends on restart)
+        // Add timestamp for when message was sent (enviado already set by transaction)
         await responseSnapshot.ref.update({
-          enviado: true,
           enviadoEn: Date.now()
         });
 

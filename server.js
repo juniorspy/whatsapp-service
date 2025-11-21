@@ -910,10 +910,10 @@ respuestasRef.on('child_added', (slugSnapshot) => {
           text: text.substring(0, 50)
         }, "Message sent via WhatsApp");
 
-        // Add timestamp for when message was sent (enviado already set by transaction)
-        await responseSnapshot.ref.update({
-          enviadoEn: Date.now()
-        });
+        // DELETE the response after sending to prevent replay on restart
+        // This is the most reliable way to prevent duplicate sends
+        await responseSnapshot.ref.remove();
+        logger.debug({ responsePath }, "Response deleted after successful send");
 
       } catch (err) {
         logger.error({

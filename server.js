@@ -65,7 +65,9 @@ const statusSchema = Joi.object({
 const addNumberSchema = Joi.object({
   tiendaId: Joi.string().trim().min(1).required(),
   slug: Joi.string().trim().min(1).required(),
-  telefono: Joi.string().trim().min(6).required()
+  telefono: Joi.string().trim().min(6).optional(),
+  displayName: Joi.string().trim().min(1).optional(),
+  webhookUrl: Joi.string().trim().uri().optional()
 });
 
 const listNumbersSchema = Joi.object({

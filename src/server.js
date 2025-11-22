@@ -907,8 +907,17 @@ async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
 // Listen to all /respuestas/ nodes for WhatsApp messages
 const respuestasRef = db.ref('/respuestas');
 
+// Track registered listeners to prevent duplicates
+const registeredListeners = new Set();
+
 respuestasRef.on('child_added', (slugSnapshot) => {
   const slug = slugSnapshot.key;
+
+  // Prevent duplicate slug listeners
+  if (registeredListeners.has(`slug:${slug}`)) {
+    return;
+  }
+  registeredListeners.add(`slug:${slug}`);
 
   slugSnapshot.ref.on('child_added', (chatIdSnapshot) => {
     const chatId = chatIdSnapshot.key;
@@ -917,6 +926,13 @@ respuestasRef.on('child_added', (slugSnapshot) => {
     if (!chatId.startsWith('web_')) {
       return;
     }
+
+    // Prevent duplicate chat listeners
+    const chatKey = `chat:${slug}:${chatId}`;
+    if (registeredListeners.has(chatKey)) {
+      return;
+    }
+    registeredListeners.add(chatKey);
 
     chatIdSnapshot.ref.on('child_added', async (responseSnapshot) => {
       const responseId = responseSnapshot.key;

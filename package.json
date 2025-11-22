@@ -1,12 +1,14 @@
 {
   "name": "whatsapp-service",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Evolution API proxy for the Colmadero Android app.",
+  "description": "Backend API for Evolution WhatsApp integration",
+  "main": "src/server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "NODE_ENV=development nodemon server.js"
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "lint": "eslint ."
   },
   "engines": {
     "node": ">=18.0.0"
@@ -14,13 +16,17 @@
   "dependencies": {
     "axios": "^1.6.7",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.3.1",
     "express": "^4.19.2",
-    "firebase-admin": "^12.5.0",
+    "firebase-admin": "^12.0.0",
     "joi": "^17.12.1",
     "pino": "^9.1.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
+    "@eslint/js": "^8.56.0",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.29.1",
+    "nodemon": "^3.0.1"
   }
 }

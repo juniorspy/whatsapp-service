@@ -904,15 +904,17 @@ async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
   }
 }
 
-// Listen to all /respuestas/ nodes for WhatsApp messages
-// CRITICAL: Use single-level listener with orderByChild to prevent listener accumulation
+// Poll /respuestas/ for new messages instead of using listeners
+// This prevents multiple instances from racing and sending duplicates
 const respuestasRef = db.ref('/respuestas');
 
-// Use a query that filters by timestamp to only get NEW responses
-respuestasRef.on('value', async (snapshot) => {
-  if (!snapshot.exists()) return;
+// Poll every 2 seconds for new responses (prevents race conditions between multiple instances)
+setInterval(async () => {
+  try {
+    const snapshot = await respuestasRef.once('value');
+    if (!snapshot.exists()) return;
 
-  const respuestas = snapshot.val();
+    const respuestas = snapshot.val();
 
   // Iterate through all responses
   for (const slug in respuestas) {
@@ -1059,9 +1061,12 @@ respuestasRef.on('value', async (snapshot) => {
       }
     }
   }
-});
+  } catch (err) {
+    logger.error({ err }, "Error in response polling loop");
+  }
+}, 2000); // Poll every 2 seconds
 
-logger.info("Firebase listener initialized for /respuestas/ (single-level, no nesting)");
+logger.info("Firebase response polling initialized (2s interval, transaction-protected)");
 
 const port = Number.parseInt(process.env.PORT ?? "4001", 10);
 http.createServer(app).listen(port, () => {

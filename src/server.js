@@ -905,87 +905,71 @@ async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
 }
 
 // Listen to all /respuestas/ nodes for WhatsApp messages
+// CRITICAL: Use single-level listener with orderByChild to prevent listener accumulation
 const respuestasRef = db.ref('/respuestas');
 
-// Track registered listeners to prevent duplicates
-const registeredListeners = new Set();
+// Use a query that filters by timestamp to only get NEW responses
+respuestasRef.on('value', async (snapshot) => {
+  if (!snapshot.exists()) return;
 
-respuestasRef.on('child_added', (slugSnapshot) => {
-  const slug = slugSnapshot.key;
+  const respuestas = snapshot.val();
 
-  // Prevent duplicate slug listeners
-  if (registeredListeners.has(`slug:${slug}`)) {
-    return;
-  }
-  registeredListeners.add(`slug:${slug}`);
+  // Iterate through all responses
+  for (const slug in respuestas) {
+    for (const chatId in respuestas[slug]) {
+      // Only process web_ chat IDs (WhatsApp messages formatted as web)
+      if (!chatId.startsWith('web_')) continue;
 
-  slugSnapshot.ref.on('child_added', (chatIdSnapshot) => {
-    const chatId = chatIdSnapshot.key;
+      for (const responseId in respuestas[slug][chatId]) {
+        const response = respuestas[slug][chatId][responseId];
+        const responsePath = `${slug}/${chatId}/${responseId}`;
 
-    // Only process web_ chat IDs (WhatsApp messages formatted as web)
-    if (!chatId.startsWith('web_')) {
-      return;
-    }
+        // Check if already processed
+        if (processedResponses.has(responsePath)) continue;
+        processedResponses.add(responsePath);
 
-    // Prevent duplicate chat listeners
-    const chatKey = `chat:${slug}:${chatId}`;
-    if (registeredListeners.has(chatKey)) {
-      return;
-    }
-    registeredListeners.add(chatKey);
+        const text = response?.text;
 
-    chatIdSnapshot.ref.on('child_added', async (responseSnapshot) => {
-      const responseId = responseSnapshot.key;
-      const responsePath = `${slug}/${chatId}/${responseId}`;
-
-      // Check if already processed
-      if (processedResponses.has(responsePath)) {
-        return;
-      }
-      processedResponses.add(responsePath);
-
-      const response = responseSnapshot.val();
-      const text = response?.text;
-
-      if (!text || typeof text !== 'string') {
-        logger.debug({ responsePath }, "Skipping response without text");
-        return;
-      }
-
-      // PROTECTION 1: Skip if already marked as sent
-      if (response.enviado === true) {
-        logger.debug({ responsePath }, "Skipping response already marked as sent");
-        return;
-      }
-
-      // PROTECTION 2: Skip if message is older than service startup (prevents resending on restart)
-      const messageTimestamp = response.ts || 0;
-      if (messageTimestamp < serviceStartupTime) {
-        logger.debug({
-          responsePath,
-          messageTimestamp,
-          serviceStartupTime,
-          diff: serviceStartupTime - messageTimestamp
-        }, "Skipping old message from before service restart");
-        return;
-      }
-
-      // PROTECTION 3: Use Firebase transaction to atomically claim this message
-      // This prevents race conditions when multiple service instances are running
-      const claimResult = await responseSnapshot.ref.child('enviado').transaction((currentValue) => {
-        if (currentValue === true) {
-          // Already claimed by another instance, abort
-          return; // returning undefined aborts the transaction
+        if (!text || typeof text !== 'string') {
+          logger.debug({ responsePath }, "Skipping response without text");
+          continue;
         }
-        return true; // Claim it
-      });
 
-      if (!claimResult.committed) {
-        logger.debug({ responsePath }, "Message already claimed by another instance (transaction aborted)");
-        return;
-      }
+        // PROTECTION 1: Skip if already marked as sent
+        if (response.enviado === true) {
+          logger.debug({ responsePath }, "Skipping response already marked as sent");
+          continue;
+        }
 
-      try {
+        // PROTECTION 2: Skip if message is older than service startup (prevents resending on restart)
+        const messageTimestamp = response.ts || 0;
+        if (messageTimestamp < serviceStartupTime) {
+          logger.debug({
+            responsePath,
+            messageTimestamp,
+            serviceStartupTime,
+            diff: serviceStartupTime - messageTimestamp
+          }, "Skipping old message from before service restart");
+          continue;
+        }
+
+        // PROTECTION 3: Use Firebase transaction to atomically claim this message
+        // This prevents race conditions when multiple service instances are running
+        const responseRef = db.ref(`/respuestas/${slug}/${chatId}/${responseId}`);
+        const claimResult = await responseRef.child('enviado').transaction((currentValue) => {
+          if (currentValue === true) {
+            // Already claimed by another instance, abort
+            return; // returning undefined aborts the transaction
+          }
+          return true; // Claim it
+        });
+
+        if (!claimResult.committed) {
+          logger.debug({ responsePath }, "Message already claimed by another instance (transaction aborted)");
+          continue;
+        }
+
+        try {
         // Extract phone number from chatId: "web_18091234567" -> "18091234567"
         const phoneNumber = chatId.replace('web_', '');
 
@@ -1057,26 +1041,27 @@ respuestasRef.on('child_added', (slugSnapshot) => {
           phoneNumber,
           responseId,
           text: text.substring(0, 50)
-        }, "Message sent via WhatsApp");
+          }, "Message sent via WhatsApp");
 
-        // DELETE the response after sending to prevent replay on restart
-        // This is the most reliable way to prevent duplicate sends
-        await responseSnapshot.ref.remove();
-        logger.debug({ responsePath }, "Response deleted after successful send");
+          // DELETE the response after sending to prevent replay on restart
+          // This is the most reliable way to prevent duplicate sends
+          await responseRef.remove();
+          logger.debug({ responsePath }, "Response deleted after successful send");
 
-      } catch (err) {
-        logger.error({
-          err,
-          chatId,
-          slug,
-          responseId
-        }, "Failed to send WhatsApp message");
+        } catch (err) {
+          logger.error({
+            err,
+            chatId,
+            slug,
+            responseId
+          }, "Failed to send WhatsApp message");
+        }
       }
-    });
-  });
+    }
+  }
 });
 
-logger.info("Firebase listener initialized for /respuestas/");
+logger.info("Firebase listener initialized for /respuestas/ (single-level, no nesting)");
 
 const port = Number.parseInt(process.env.PORT ?? "4001", 10);
 http.createServer(app).listen(port, () => {

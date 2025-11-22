@@ -517,6 +517,104 @@ app.get("/api/v1/whatsapp/numbers/:numberId/status", async (req, res) => {
   }
 });
 
+// Delete a WhatsApp number
+app.delete("/api/v1/whatsapp/numbers/:numberId", async (req, res) => {
+  const tiendaId = req.query.tiendaId;
+  const numberId = req.params.numberId;
+
+  if (!tiendaId) {
+    return res.status(400).json({ error: "validation_error", message: "tiendaId is required" });
+  }
+
+  if (!numberId) {
+    return res.status(400).json({ error: "validation_error", message: "numberId is required" });
+  }
+
+  // Prevent deletion of primary number
+  if (numberId === "primary") {
+    return res.status(400).json({
+      error: "cannot_delete_primary",
+      message: "Cannot delete primary number. Delete from additional numbers only."
+    });
+  }
+
+  try {
+    // Get the number configuration
+    const snapshot = await db.ref(`/tiendas/${tiendaId}/whatsapp_numbers/${numberId}`).get();
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: "not_found", message: "Number not found" });
+    }
+
+    const config = snapshot.val();
+    const instanceName = config.instanceName;
+
+    // IMPORTANT: Close session and delete instance from Evolution API BEFORE deleting from Firebase
+    if (instanceName) {
+      try {
+        logger.info(
+          { tiendaId, numberId, instanceName },
+          "Deleting Evolution instance before removing from Firebase"
+        );
+
+        // Delete from Evolution API
+        await evolution.delete(`/instance/delete/${encodeURIComponent(instanceName)}`, {
+          headers: {
+            apikey: process.env.EVOLUTION_MASTER_KEY
+          }
+        });
+
+        logger.info(
+          { tiendaId, numberId, instanceName },
+          "Evolution instance deleted successfully"
+        );
+      } catch (evolutionError) {
+        // Log but don't fail if Evolution deletion fails with 404 (instance already deleted)
+        const status = evolutionError.response?.status;
+        logger.warn(
+          {
+            tiendaId,
+            numberId,
+            instanceName,
+            error: evolutionError.message,
+            status
+          },
+          "Failed to delete Evolution instance (may already be deleted)"
+        );
+
+        // Only fail if it's not a 404 (instance not found)
+        if (status && status !== 404) {
+          return res.status(502).json({
+            error: "evolution_error",
+            message: `Failed to delete Evolution instance: ${evolutionError.message}`
+          });
+        }
+      }
+    }
+
+    // Delete from Firebase /whatsapp_numbers/
+    await db.ref(`/tiendas/${tiendaId}/whatsapp_numbers/${numberId}`).remove();
+
+    // Delete from /evolution_instances/ reverse lookup
+    if (instanceName) {
+      await db.ref(`/evolution_instances/${instanceName}`).remove();
+    }
+
+    logger.info(
+      { tiendaId, numberId, telefono: config.telefono },
+      "WhatsApp number deleted from Firebase"
+    );
+
+    res.json({
+      success: true,
+      deleted: true,
+      numberId
+    });
+  } catch (err) {
+    logger.error({ err, tiendaId, numberId }, "Failed to delete WhatsApp number");
+    res.status(500).json({ error: "server_error", message: err.message });
+  }
+});
+
 // ============================================================================
 // Evolution Webhook Endpoint - Receives messages from WhatsApp
 // ============================================================================

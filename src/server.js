@@ -307,7 +307,27 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
   }
 
   try {
-    const baseInstanceName = `colmado_${normalizeSlug(value.slug)}`;
+    // CRITICAL: Get the REAL tienda slug from the primary evolution config
+    // The value.slug from request is just a display name, NOT the store slug!
+    const primaryEvolution = await db.ref(`/tiendas/${value.tiendaId}/evolution`).get();
+    if (!primaryEvolution.exists()) {
+      return res.status(404).json({
+        error: "not_found",
+        message: "No primary WhatsApp number found for this tienda. Set up primary number first."
+      });
+    }
+
+    const realSlug = primaryEvolution.val().slug;
+    if (!realSlug) {
+      return res.status(500).json({
+        error: "invalid_state",
+        message: "Primary evolution config missing slug"
+      });
+    }
+
+    logger.info({ tiendaId: value.tiendaId, realSlug, requestSlug: value.slug }, "Using real tienda slug for additional number");
+
+    const baseInstanceName = `colmado_${normalizeSlug(realSlug)}`;
 
     // Find next available number suffix
     const existingNumbers = await db.ref(`/tiendas/${value.tiendaId}/whatsapp_numbers`).get();
@@ -358,7 +378,7 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
     const record = {
       instanceName,
       apiKey,
-      slug: value.slug,
+      slug: realSlug,  // FIXED: Use real tienda slug, not display name
       telefono: value.telefono || null,
       displayName: value.displayName || `Número ${nextSuffix}`,
       webhookUrl: whatsappServiceWebhook,
@@ -375,7 +395,7 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
     await db.ref(`/evolution_instances/${instanceName}`).set({
       tiendaId: value.tiendaId,
       apiKey: apiKey,
-      slug: value.slug,
+      slug: realSlug,  // FIXED: Use real tienda slug, not display name
       numberId: numberId,
       createdAt: Date.now()
     });

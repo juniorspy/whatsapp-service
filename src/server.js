@@ -733,9 +733,24 @@ app.post("/webhook/evolution", async (req, res) => {
     // Extract timestamp (Evolution uses seconds, Firebase needs milliseconds)
     const ts = (data?.messageTimestamp ?? Math.floor(Date.now() / 1000)) * 1000;
 
-    // Extract slug from instance name: "colmado_colmado_william" -> "colmado_william"
-    // Also strip _2, _3, etc. suffix for multi-number instances
-    const slug = instance ? instance.replace(/^colmado_/, '').replace(/_\d+$/, '') : 'unknown';
+    // Get slug from /evolution_instances/ lookup (supports multi-number)
+    let slug = 'unknown';
+    try {
+      const instanceLookup = await db.ref(`/evolution_instances/${instance}`).get();
+      if (instanceLookup.exists()) {
+        slug = instanceLookup.val().slug || 'unknown';
+        logger.debug({ instance, slug }, "Slug retrieved from evolution_instances lookup");
+      } else {
+        // Fallback: Extract slug from instance name (legacy support)
+        // "colmado_colmado_william" -> "colmado_william"
+        // Also strip _2, _3, etc. suffix for multi-number instances
+        slug = instance ? instance.replace(/^colmado_/, '').replace(/_\d+$/, '') : 'unknown';
+        logger.warn({ instance, slug }, "Instance not found in evolution_instances, using parsed slug (may be incorrect)");
+      }
+    } catch (lookupError) {
+      logger.error({ err: lookupError, instance }, "Failed to lookup instance slug, using parsed fallback");
+      slug = instance ? instance.replace(/^colmado_/, '').replace(/_\d+$/, '') : 'unknown';
+    }
 
     // RESPOND IMMEDIATELY to avoid Evolution timeout
     res.status(200).json({

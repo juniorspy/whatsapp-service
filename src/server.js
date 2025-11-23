@@ -917,221 +917,143 @@ let pollCount = 0;
 setInterval(async () => {
   try {
     pollCount++;
-    logger.debug({ pollCount }, "🔄 Polling /respuestas for new responses");
+    // Only log pollCount every 30 polls (approx 1 minute) to reduce noise
+    if (pollCount % 30 === 0) logger.debug({ pollCount }, "🔄 Polling /respuestas (heartbeat)");
 
     const snapshot = await respuestasRef.once('value');
-    if (!snapshot.exists()) {
-      logger.debug({ pollCount }, "⚪ No /respuestas node exists");
-      return;
-    }
+    if (!snapshot.exists()) return;
 
     const respuestas = snapshot.val();
-    const totalSlugs = Object.keys(respuestas).length;
-    logger.debug({ pollCount, totalSlugs }, "📊 Respuestas snapshot retrieved");
 
-  // Iterate through all responses
-  for (const slug in respuestas) {
-    const chatsInSlug = Object.keys(respuestas[slug]).length;
-    logger.debug({ slug, chatsInSlug }, "🟢 Processing slug");
+    // Iterate through all slugs (stores)
+    for (const slug in respuestas) {
+      if (!respuestas[slug]) continue;
 
-    for (const chatId in respuestas[slug]) {
-      // Only process web_ chat IDs (WhatsApp messages formatted as web)
-      if (!chatId.startsWith('web_')) {
-        logger.debug({ slug, chatId }, "⚪ SKIP: Not a web_ chatId");
-        continue;
-      }
+      // Iterate through all chats
+      for (const chatId in respuestas[slug]) {
+        // Filter: Only process web_ chat IDs
+        if (!chatId.startsWith('web_')) continue;
 
-      const responsesInChat = Object.keys(respuestas[slug][chatId]).length;
-      logger.debug({ slug, chatId, responsesInChat }, "🟡 Processing chat");
+        // Iterate through all messages in the chat
+        for (const responseId in respuestas[slug][chatId]) {
+          const response = respuestas[slug][chatId][responseId];
+          const responsePath = `${slug}/${chatId}/${responseId}`;
 
-      for (const responseId in respuestas[slug][chatId]) {
-        const response = respuestas[slug][chatId][responseId];
-        const responsePath = `${slug}/${chatId}/${responseId}`;
-
-        logger.info({
-          slug,
-          chatId,
-          responseId,
-          responsePath,
-          hasText: !!response?.text,
-          enviado: response?.enviado,
-          ts: response?.ts,
-          processedSetSize: processedResponses.size
-        }, "🔴 NEW RESPONSE detected in poll - STARTING PROCESSING");
-
-        // Check if already processed
-        if (processedResponses.has(responsePath)) {
-          logger.debug({ responsePath }, "⚪ SKIP: Already in processedResponses Set");
-          continue;
-        }
-        processedResponses.add(responsePath);
-
-        const text = response?.text;
-
-        if (!text || typeof text !== 'string') {
-          logger.warn({ responsePath, response }, "❌ SKIP: Response has no text");
-          continue;
-        }
-
-        // PROTECTION 1: Skip if already marked as sent
-        if (response.enviado === true) {
-          logger.warn({ responsePath }, "❌ SKIP: Response already marked as enviado=true");
-          continue;
-        }
-
-        // PROTECTION 2: Skip if message is older than service startup (prevents resending on restart)
-        const messageTimestamp = response.ts || 0;
-        if (messageTimestamp < serviceStartupTime) {
-          logger.warn({
-            responsePath,
-            messageTimestamp,
-            serviceStartupTime,
-            diff: serviceStartupTime - messageTimestamp,
-            messageDate: new Date(messageTimestamp).toISOString(),
-            startupDate: new Date(serviceStartupTime).toISOString()
-          }, "❌ SKIP: Message older than service startup");
-          continue;
-        }
-
-        logger.info({ responsePath, messageTimestamp, serviceStartupTime }, "🔵 ATTEMPTING TRANSACTION to claim message");
-
-        // PROTECTION 3: Use Firebase transaction to atomically claim this message
-        // This prevents race conditions when multiple service instances are running
-        const responseRef = db.ref(`/respuestas/${slug}/${chatId}/${responseId}`);
-        const claimResult = await responseRef.child('enviado').transaction((currentValue) => {
-          if (currentValue === true) {
-            // Already claimed by another instance, abort
-            logger.debug({ responsePath, currentValue }, "Transaction sees enviado=true, aborting");
-            return; // returning undefined aborts the transaction
-          }
-          logger.debug({ responsePath, currentValue }, "Transaction claiming message (setting enviado=true)");
-          return true; // Claim it
-        });
-
-        if (!claimResult.committed) {
-          logger.warn({
-            responsePath,
-            committed: claimResult.committed,
-            snapshot: claimResult.snapshot?.val()
-          }, "❌ TRANSACTION FAILED: Message already claimed by another instance");
-          continue;
-        }
-
-        logger.info({ responsePath }, "✅ TRANSACTION SUCCESS: Message claimed by this instance");
-
-        try {
-        logger.info({ responsePath }, "📞 Starting message send process");
-
-        // Extract phone number from chatId: "web_18091234567" -> "18091234567"
-        const phoneNumber = chatId.replace('web_', '');
-        logger.debug({ responsePath, phoneNumber }, "Extracted phone number from chatId");
-
-        // Get tiendaId from slug
-        const tiendaIdSnapshot = await db.ref(`/tiendas_por_slug/${slug}`).get();
-        if (!tiendaIdSnapshot.exists()) {
-          logger.error({ slug, responsePath }, "❌ No tiendaId found for slug");
-          return;
-        }
-
-        const tiendaId = tiendaIdSnapshot.val();
-        logger.debug({ slug, tiendaId, responsePath }, "Found tiendaId for slug");
-
-        // Check chat-to-instance mapping to find which number received the original message
-        let instanceName = null;
-        let apiKey = null;
-
-        logger.debug({ slug, chatId, responsePath }, "Looking up chat instance mapping");
-        const chatInstanceSnapshot = await db.ref(`/chat_instances/${slug}/${chatId}`).get();
-        if (chatInstanceSnapshot.exists()) {
-          const chatInstance = chatInstanceSnapshot.val();
-          const mappedInstanceName = chatInstance.instanceName;
-          logger.debug({ responsePath, mappedInstanceName }, "Found chat instance mapping");
-
-          // Look up instance in /evolution_instances/ (reverse lookup)
-          const instanceLookup = await db.ref(`/evolution_instances/${mappedInstanceName}`).get();
-          if (instanceLookup.exists()) {
-            instanceName = mappedInstanceName;
-            apiKey = instanceLookup.val().apiKey;
-            logger.info({ slug, chatId, instanceName, responsePath }, "✅ Using mapped instance for response");
-          }
-        } else {
-          logger.debug({ responsePath }, "No chat instance mapping found, will use primary");
-        }
-
-        // Fallback: Use primary /evolution config if no mapping found
-        if (!instanceName || !apiKey) {
-          logger.debug({ tiendaId, responsePath }, "Falling back to primary evolution config");
-          const evolutionSnapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
-          if (!evolutionSnapshot.exists()) {
-            logger.error({ slug, tiendaId, responsePath }, "❌ No Evolution config found for tienda");
-            return;
+          // ============================================================
+          // 🛡️ FIX 1: SELF-HEALING CLEANUP
+          // If message is already sent, DELETE IT immediately.
+          // Don't just skip it, or it will clutter the DB and logs forever.
+          // ============================================================
+          if (response.enviado === true) {
+            logger.warn({ responsePath }, "🧹 CLEANUP: Found 'enviado: true' message. Deleting from DB.");
+            try {
+              await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).remove();
+              // Remove from local Set so we don't track it anymore
+              processedResponses.delete(responsePath);
+            } catch (e) {
+              logger.error({ err: e, responsePath }, "Failed to delete cleanup message");
+            }
+            continue;
           }
 
-          const evolutionConfig = evolutionSnapshot.val();
-          instanceName = evolutionConfig.instanceName;
-          apiKey = evolutionConfig.apiKey;
-          logger.info({ slug, chatId, instanceName, responsePath }, "✅ Using primary instance for response (no mapping)");
-        }
+          // Check local memory cache to avoid reprocessing in same cycle
+          if (processedResponses.has(responsePath)) continue;
+          processedResponses.add(responsePath);
 
-        if (!instanceName || !apiKey) {
-          logger.error({ slug, tiendaId, responsePath }, "❌ Missing instanceName or apiKey in Evolution config");
-          return;
-        }
+          const text = response?.text;
+          // Safety check for invalid content
+          if (!text || typeof text !== 'string') {
+             // If invalid, delete it to stop the loop
+             logger.warn({ responsePath }, "❌ INVALID: Response has no text. Deleting.");
+             await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).remove();
+             continue;
+          }
 
-        // Send message via Evolution API with retry logic (3 attempts)
-        logger.info({
-          responsePath,
-          instanceName,
-          phoneNumber,
-          textPreview: text.substring(0, 50)
-        }, "🚀 SENDING MESSAGE via Evolution API");
+          // Protection: Skip old messages from before reboot
+          const messageTimestamp = response.ts || 0;
+          if (messageTimestamp < serviceStartupTime) {
+            logger.warn({ responsePath }, "⏰ EXPIRED: Message older than service startup. Deleting.");
+            await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).remove();
+            continue;
+          }
 
-        const sendResponse = await retryWithBackoff(async () => {
-          return await evolution.post(
-            `/message/sendText/${encodeURIComponent(instanceName)}`,
-            {
-              number: phoneNumber,
-              text: text
-            },
-            {
-              headers: {
-                apikey: apiKey
+          logger.info({ responsePath }, "🔵 NEW MESSAGE: Attempting Transaction");
+
+          // 🛡️ FIX 2: TRANSACTION LOCK
+          const responseRef = db.ref(`/respuestas/${slug}/${chatId}/${responseId}`);
+          const claimResult = await responseRef.child('enviado').transaction((currentValue) => {
+            if (currentValue === true) return; // Abort if someone else took it
+            return true; // Lock it
+          });
+
+          if (!claimResult.committed) {
+            logger.debug({ responsePath }, "🔒 Locked by another thread/process");
+            continue;
+          }
+
+          // --- SENDING LOGIC STARTS HERE ---
+          try {
+            const phoneNumber = chatId.replace('web_', '');
+
+            // 1. Get Instance Mapping
+            let instanceName = null;
+            let apiKey = null;
+
+            const chatInstanceSnapshot = await db.ref(`/chat_instances/${slug}/${chatId}`).get();
+            if (chatInstanceSnapshot.exists()) {
+              const mappedInstance = chatInstanceSnapshot.val().instanceName;
+              const instanceLookup = await db.ref(`/evolution_instances/${mappedInstance}`).get();
+              if (instanceLookup.exists()) {
+                instanceName = mappedInstance;
+                apiKey = instanceLookup.val().apiKey;
               }
             }
-          );
-        }, 3, 1000);
 
-        logger.info({
-          chatId,
-          slug,
-          phoneNumber,
-          responseId,
-          instanceName,
-          textPreview: text.substring(0, 50),
-          fullText: text
-          }, "✅ MESSAGE SENT SUCCESSFULLY via WhatsApp");
+            // 2. Fallback to Primary
+            if (!instanceName) {
+              const tiendaIdSnapshot = await db.ref(`/tiendas_por_slug/${slug}`).get();
+              if (tiendaIdSnapshot.exists()) {
+                 const tiendaId = tiendaIdSnapshot.val();
+                 const evolutionSnapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
+                 if (evolutionSnapshot.exists()) {
+                   instanceName = evolutionSnapshot.val().instanceName;
+                   apiKey = evolutionSnapshot.val().apiKey;
+                 }
+              }
+            }
 
-          // DELETE the response after sending to prevent replay on restart
-          // This is the most reliable way to prevent duplicate sends
-          logger.info({ responsePath }, "🗑️ DELETING response from Firebase");
-          await responseRef.remove();
-          logger.info({ responsePath }, "✅ Response deleted after successful send");
+            if (instanceName && apiKey) {
+              logger.info({ responsePath, instanceName }, "🚀 SENDING to WhatsApp...");
 
-        } catch (err) {
-          logger.error({
-            err,
-            chatId,
-            slug,
-            responseId
-          }, "Failed to send WhatsApp message");
+              await retryWithBackoff(async () => {
+                return await evolution.post(
+                  `/message/sendText/${encodeURIComponent(instanceName)}`,
+                  { number: phoneNumber, text: text },
+                  { headers: { apikey: apiKey } }
+                );
+              }, 3, 1000);
+
+              logger.info({ responsePath }, "✅ SENT. Deleting from DB.");
+            } else {
+              logger.error({ responsePath }, "❌ NO INSTANCE FOUND. Deleting to prevent loop.");
+            }
+
+          } catch (err) {
+            logger.error({ err, responsePath }, "❌ SEND FAILED");
+          } finally {
+            // 🛡️ FIX 3: ALWAYS DELETE
+            // Whether sent successfully or failed (invalid instance),
+            // delete it so we don't loop forever.
+            await responseRef.remove();
+            processedResponses.delete(responsePath);
+          }
         }
       }
     }
-  }
   } catch (err) {
-    logger.error({ err }, "Error in response polling loop");
+    logger.error({ err }, "Error in polling loop");
   }
-}, 2000); // Poll every 2 seconds
+}, 2000);
 
 logger.info("Firebase response polling initialized (2s interval, transaction-protected)");
 

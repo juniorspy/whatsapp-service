@@ -920,6 +920,12 @@ setInterval(async () => {
     // Only log pollCount every 30 polls (approx 1 minute) to reduce noise
     if (pollCount % 30 === 0) logger.debug({ pollCount }, "🔄 Polling /respuestas (heartbeat)");
 
+    // ⚠️ PERFORMANCE NOTE: This queries ALL respuestas nodes (including sent ones)
+    // Firebase RTDB doesn't support querying for "field not exists" efficiently
+    // The filter `enviado === true` at line ~947 skips already-sent messages
+    // TODO: For better scalability, consider:
+    //   1. Separate /respuestas_pendientes and /respuestas_enviadas paths
+    //   2. Or use Firestore which supports better queries
     const snapshot = await respuestasRef.once('value');
     if (!snapshot.exists()) return;
 
@@ -940,19 +946,12 @@ setInterval(async () => {
           const responsePath = `${slug}/${chatId}/${responseId}`;
 
           // ============================================================
-          // 🛡️ FIX 1: SELF-HEALING CLEANUP
-          // If message is already sent, DELETE IT immediately.
-          // Don't just skip it, or it will clutter the DB and logs forever.
+          // 🛡️ FIX 1: SKIP ALREADY SENT
+          // If message is already sent, skip it (no longer delete).
+          // Messages are kept for conversation history.
           // ============================================================
           if (response.enviado === true) {
-            logger.warn({ responsePath }, "🧹 CLEANUP: Found 'enviado: true' message. Deleting from DB.");
-            try {
-              await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).remove();
-              // Remove from local Set so we don't track it anymore
-              processedResponses.delete(responsePath);
-            } catch (e) {
-              logger.error({ err: e, responsePath }, "Failed to delete cleanup message");
-            }
+            logger.debug({ responsePath }, "⏭️ SKIP: Already sent (enviado: true)");
             continue;
           }
 
@@ -963,17 +962,25 @@ setInterval(async () => {
           const text = response?.text;
           // Safety check for invalid content
           if (!text || typeof text !== 'string') {
-             // If invalid, delete it to stop the loop
-             logger.warn({ responsePath }, "❌ INVALID: Response has no text. Deleting.");
-             await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).remove();
+             // Mark as invalid instead of deleting
+             logger.warn({ responsePath }, "❌ INVALID: Response has no text. Marking as failed.");
+             await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).update({
+               enviado: true,
+               enviadoAt: Date.now(),
+               sendError: "Invalid message: no text field"
+             });
              continue;
           }
 
           // Protection: Skip old messages from before reboot
           const messageTimestamp = response.ts || 0;
           if (messageTimestamp < serviceStartupTime) {
-            logger.warn({ responsePath }, "⏰ EXPIRED: Message older than service startup. Deleting.");
-            await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).remove();
+            logger.warn({ responsePath }, "⏰ EXPIRED: Message older than service startup. Marking as expired.");
+            await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).update({
+              enviado: true,
+              enviadoAt: Date.now(),
+              sendError: "Message expired (older than service startup)"
+            });
             continue;
           }
 
@@ -1033,18 +1040,36 @@ setInterval(async () => {
                 );
               }, 3, 1000);
 
-              logger.info({ responsePath }, "✅ SENT. Deleting from DB.");
+              // Mark as sent successfully with timestamp
+              await responseRef.update({
+                enviado: true,
+                enviadoAt: Date.now(),
+                instanceUsed: instanceName
+              });
+
+              logger.info({ responsePath }, "✅ SENT. Marked in DB.");
             } else {
-              logger.error({ responsePath }, "❌ NO INSTANCE FOUND. Deleting to prevent loop.");
+              logger.error({ responsePath }, "❌ NO INSTANCE FOUND. Marking to prevent loop.");
+              // Mark as failed due to no instance
+              await responseRef.update({
+                enviado: true,
+                enviadoAt: Date.now(),
+                sendError: "No WhatsApp instance found"
+              });
             }
 
           } catch (err) {
             logger.error({ err, responsePath }, "❌ SEND FAILED");
+            // Mark as failed instead of deleting
+            await responseRef.update({
+              enviado: true,
+              enviadoAt: Date.now(),
+              sendError: err?.message || String(err)
+            });
           } finally {
-            // 🛡️ FIX 3: ALWAYS DELETE
-            // Whether sent successfully or failed (invalid instance),
-            // delete it so we don't loop forever.
-            await responseRef.remove();
+            // 🛡️ MODIFIED: Don't delete - messages are now kept for history
+            // The 'enviado: true' flag (set by transaction or in catch block)
+            // prevents reprocessing in future polls
             processedResponses.delete(responsePath);
           }
         }

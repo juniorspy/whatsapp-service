@@ -159,16 +159,33 @@ const fetchQr = async (instanceName, apiKey) => {
 
 const fetchPairingCode = async (instanceName, apiKey) => {
   try {
-    // Intentar obtener código de emparejamiento desde Evolution API
-    // Algunos endpoints posibles: /instance/mobile, /instance/code, /instance/connect
-    const response = await evolution.get(`/instance/connect/${encodeURIComponent(instanceName)}`, {
-      headers: { apikey: apiKey },
-      params: { mobile: true } // Solicitar código en lugar de QR
-    });
+    // Evolution API v2: Solicitar código de emparejamiento
+    // Endpoint correcto: POST /instance/mobile con el número de teléfono
+    const response = await evolution.post(
+      `/instance/mobile/${encodeURIComponent(instanceName)}`,
+      {
+        number: "" // Dejar vacío para generar código sin número específico
+      },
+      {
+        headers: { apikey: apiKey }
+      }
+    );
+
     const data = response.data;
-    return data?.code ?? data?.pairingCode ?? null;
+    logger.info({ data }, "Pairing code response from Evolution");
+
+    // El código viene en diferentes formatos según la versión de Evolution
+    const code = data?.code ?? data?.pairingCode ?? data?.mobile?.code ?? null;
+
+    // Validar que sea un código de 8 dígitos
+    if (code && /^\d{8}$/.test(code)) {
+      return code;
+    }
+
+    logger.warn({ code, data }, "Invalid pairing code format received");
+    return null;
   } catch (error) {
-    logger.error({ error, instanceName }, "Failed to fetch pairing code");
+    logger.error({ error: error.message, instanceName }, "Failed to fetch pairing code");
     return null;
   }
 };

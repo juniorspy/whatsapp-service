@@ -208,7 +208,9 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       ? (data.qrcode.base64.startsWith('data:')
           ? data.qrcode.base64
           : `data:image/png;base64,${data.qrcode.base64}`)
-      : (data?.qrcode?.code ?? null);
+      : null;
+
+    const pairingCode = data?.qrcode?.code ?? data?.code ?? null;
 
     const record = {
       instanceName,
@@ -218,6 +220,7 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       webhookUrl: whatsappServiceWebhook, // Save whatsapp-service URL
       status: "pending",
       qrCode: qrCodeData,
+      pairingCode: pairingCode,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -237,6 +240,7 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       status: "pending",
       instanceName,
       qrCode: qrCodeData,
+      pairingCode: pairingCode,
       apiKey,
       evolutionResponse: data
     });
@@ -266,13 +270,21 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
     const connectionStatus = state?.instance?.connectionStatus ?? "close";
 
     let qrCode = config.qrCode;
+    let pairingCode = config.pairingCode;
     if (value.includeQr && connectionStatus !== "open") {
-      qrCode = await fetchQr(config.instanceName, config.apiKey);
+      const qrData = await fetchQr(config.instanceName, config.apiKey);
+      // fetchQr puede devolver base64 o código de emparejamiento
+      if (qrData && qrData.startsWith('data:')) {
+        qrCode = qrData;
+      } else {
+        pairingCode = qrData;
+      }
     }
 
     await db.ref(`/tiendas/${value.tiendaId}/evolution`).update({
       status: connectionStatus === "open" ? "connected" : "pending",
       qrCode,
+      pairingCode,
       lastSyncedAt: Date.now(),
       connectionStatus
     });
@@ -284,7 +296,8 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
       connectionStatus,
       number: state?.instance?.number ?? null,
       profileName: state?.instance?.profileName ?? null,
-      qrCode: value.includeQr ? qrCode : undefined
+      qrCode: value.includeQr ? qrCode : undefined,
+      pairingCode: value.includeQr ? pairingCode : undefined
     });
   } catch (err) {
     logger.error({ err }, "Failed to fetch Evolution status");
@@ -307,27 +320,7 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
   }
 
   try {
-    // CRITICAL: Get the REAL tienda slug from the primary evolution config
-    // The value.slug from request is just a display name, NOT the store slug!
-    const primaryEvolution = await db.ref(`/tiendas/${value.tiendaId}/evolution`).get();
-    if (!primaryEvolution.exists()) {
-      return res.status(404).json({
-        error: "not_found",
-        message: "No primary WhatsApp number found for this tienda. Set up primary number first."
-      });
-    }
-
-    const realSlug = primaryEvolution.val().slug;
-    if (!realSlug) {
-      return res.status(500).json({
-        error: "invalid_state",
-        message: "Primary evolution config missing slug"
-      });
-    }
-
-    logger.info({ tiendaId: value.tiendaId, realSlug, requestSlug: value.slug }, "Using real tienda slug for additional number");
-
-    const baseInstanceName = `colmado_${normalizeSlug(realSlug)}`;
+    const baseInstanceName = `colmado_${normalizeSlug(value.slug)}`;
 
     // Find next available number suffix
     const existingNumbers = await db.ref(`/tiendas/${value.tiendaId}/whatsapp_numbers`).get();
@@ -372,18 +365,21 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
       ? (data.qrcode.base64.startsWith('data:')
           ? data.qrcode.base64
           : `data:image/png;base64,${data.qrcode.base64}`)
-      : (data?.qrcode?.code ?? null);
+      : null;
+
+    const pairingCode = data?.qrcode?.code ?? data?.code ?? null;
 
     const numberId = `number_${nextSuffix}`;
     const record = {
       instanceName,
       apiKey,
-      slug: realSlug,  // FIXED: Use real tienda slug, not display name
+      slug: value.slug,
       telefono: value.telefono || null,
       displayName: value.displayName || `Número ${nextSuffix}`,
       webhookUrl: whatsappServiceWebhook,
       status: "pending",
       qrCode: qrCodeData,
+      pairingCode: pairingCode,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -395,7 +391,7 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
     await db.ref(`/evolution_instances/${instanceName}`).set({
       tiendaId: value.tiendaId,
       apiKey: apiKey,
-      slug: realSlug,  // FIXED: Use real tienda slug, not display name
+      slug: value.slug,
       numberId: numberId,
       createdAt: Date.now()
     });
@@ -408,6 +404,7 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
       instanceName,
       numberId,
       qrCode: qrCodeData,
+      pairingCode: pairingCode,
       apiKey
     });
   } catch (err) {
@@ -505,8 +502,15 @@ app.get("/api/v1/whatsapp/numbers/:numberId/status", async (req, res) => {
     const connectionStatus = state?.instance?.connectionStatus ?? "close";
 
     let qrCode = config.qrCode;
+    let pairingCode = config.pairingCode;
     if (includeQr && connectionStatus !== "open") {
-      qrCode = await fetchQr(config.instanceName, config.apiKey);
+      const qrData = await fetchQr(config.instanceName, config.apiKey);
+      // fetchQr puede devolver base64 o código de emparejamiento
+      if (qrData && qrData.startsWith('data:')) {
+        qrCode = qrData;
+      } else {
+        pairingCode = qrData;
+      }
     }
 
     // Update status in Firebase
@@ -517,6 +521,7 @@ app.get("/api/v1/whatsapp/numbers/:numberId/status", async (req, res) => {
     await db.ref(updatePath).update({
       status: connectionStatus === "open" ? "connected" : "pending",
       qrCode,
+      pairingCode,
       lastSyncedAt: Date.now(),
       connectionStatus
     });
@@ -529,109 +534,12 @@ app.get("/api/v1/whatsapp/numbers/:numberId/status", async (req, res) => {
       connectionStatus,
       number: state?.instance?.number ?? null,
       profileName: state?.instance?.profileName ?? null,
-      qrCode: includeQr ? qrCode : undefined
+      qrCode: includeQr ? qrCode : undefined,
+      pairingCode: includeQr ? pairingCode : undefined
     });
   } catch (err) {
     logger.error({ err, numberId }, "Failed to fetch number status");
     res.status(502).json({ error: "evolution_error", message: err.message });
-  }
-});
-
-// Delete a WhatsApp number
-app.delete("/api/v1/whatsapp/numbers/:numberId", async (req, res) => {
-  const tiendaId = req.query.tiendaId;
-  const numberId = req.params.numberId;
-
-  if (!tiendaId) {
-    return res.status(400).json({ error: "validation_error", message: "tiendaId is required" });
-  }
-
-  if (!numberId) {
-    return res.status(400).json({ error: "validation_error", message: "numberId is required" });
-  }
-
-  // Prevent deletion of primary number
-  if (numberId === "primary") {
-    return res.status(400).json({
-      error: "cannot_delete_primary",
-      message: "Cannot delete primary number. Delete from additional numbers only."
-    });
-  }
-
-  try {
-    // Get the number configuration
-    const snapshot = await db.ref(`/tiendas/${tiendaId}/whatsapp_numbers/${numberId}`).get();
-    if (!snapshot.exists()) {
-      return res.status(404).json({ error: "not_found", message: "Number not found" });
-    }
-
-    const config = snapshot.val();
-    const instanceName = config.instanceName;
-
-    // IMPORTANT: Close session and delete instance from Evolution API BEFORE deleting from Firebase
-    if (instanceName) {
-      try {
-        logger.info(
-          { tiendaId, numberId, instanceName },
-          "Deleting Evolution instance before removing from Firebase"
-        );
-
-        // Delete from Evolution API
-        await evolution.delete(`/instance/delete/${encodeURIComponent(instanceName)}`, {
-          headers: {
-            apikey: process.env.EVOLUTION_MASTER_KEY
-          }
-        });
-
-        logger.info(
-          { tiendaId, numberId, instanceName },
-          "Evolution instance deleted successfully"
-        );
-      } catch (evolutionError) {
-        // Log but don't fail if Evolution deletion fails with 404 (instance already deleted)
-        const status = evolutionError.response?.status;
-        logger.warn(
-          {
-            tiendaId,
-            numberId,
-            instanceName,
-            error: evolutionError.message,
-            status
-          },
-          "Failed to delete Evolution instance (may already be deleted)"
-        );
-
-        // Only fail if it's not a 404 (instance not found)
-        if (status && status !== 404) {
-          return res.status(502).json({
-            error: "evolution_error",
-            message: `Failed to delete Evolution instance: ${evolutionError.message}`
-          });
-        }
-      }
-    }
-
-    // Delete from Firebase /whatsapp_numbers/
-    await db.ref(`/tiendas/${tiendaId}/whatsapp_numbers/${numberId}`).remove();
-
-    // Delete from /evolution_instances/ reverse lookup
-    if (instanceName) {
-      await db.ref(`/evolution_instances/${instanceName}`).remove();
-    }
-
-    logger.info(
-      { tiendaId, numberId, telefono: config.telefono },
-      "WhatsApp number deleted from Firebase"
-    );
-
-    res.json({
-      success: true,
-      deleted: true,
-      numberId
-    });
-  } catch (err) {
-    logger.error({ err, tiendaId, numberId }, "Failed to delete WhatsApp number");
-    res.status(500).json({ error: "server_error", message: err.message });
   }
 });
 
@@ -753,24 +661,9 @@ app.post("/webhook/evolution", async (req, res) => {
     // Extract timestamp (Evolution uses seconds, Firebase needs milliseconds)
     const ts = (data?.messageTimestamp ?? Math.floor(Date.now() / 1000)) * 1000;
 
-    // Get slug from /evolution_instances/ lookup (supports multi-number)
-    let slug = 'unknown';
-    try {
-      const instanceLookup = await db.ref(`/evolution_instances/${instance}`).get();
-      if (instanceLookup.exists()) {
-        slug = instanceLookup.val().slug || 'unknown';
-        logger.debug({ instance, slug }, "Slug retrieved from evolution_instances lookup");
-      } else {
-        // Fallback: Extract slug from instance name (legacy support)
-        // "colmado_colmado_william" -> "colmado_william"
-        // Also strip _2, _3, etc. suffix for multi-number instances
-        slug = instance ? instance.replace(/^colmado_/, '').replace(/_\d+$/, '') : 'unknown';
-        logger.warn({ instance, slug }, "Instance not found in evolution_instances, using parsed slug (may be incorrect)");
-      }
-    } catch (lookupError) {
-      logger.error({ err: lookupError, instance }, "Failed to lookup instance slug, using parsed fallback");
-      slug = instance ? instance.replace(/^colmado_/, '').replace(/_\d+$/, '') : 'unknown';
-    }
+    // Extract slug from instance name: "colmado_colmado_william" -> "colmado_william"
+    // Also strip _2, _3, etc. suffix for multi-number instances
+    const slug = instance ? instance.replace(/^colmado_/, '').replace(/_\d+$/, '') : 'unknown';
 
     // RESPOND IMMEDIATELY to avoid Evolution timeout
     res.status(200).json({
@@ -904,183 +797,214 @@ async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
   }
 }
 
-// Poll /respuestas/ for new messages instead of using listeners
-// This prevents multiple instances from racing and sending duplicates
+// Listen to all /respuestas/ nodes for WhatsApp messages
 const respuestasRef = db.ref('/respuestas');
 
-logger.info("🔵 INITIALIZING /respuestas POLLING at service startup");
-logger.info({ serviceStartupTime, date: new Date(serviceStartupTime).toISOString(), pollInterval: 2000 }, "Service startup timestamp and polling config");
+logger.info("🔵 INITIALIZING /respuestas listener at service startup");
+logger.info({ serviceStartupTime, date: new Date(serviceStartupTime).toISOString() }, "Service startup timestamp");
 
-let pollCount = 0;
+respuestasRef.on('child_added', (slugSnapshot) => {
+  const slug = slugSnapshot.key;
+  logger.info({ slug }, "🟢 NEW SLUG detected in /respuestas/");
 
-// Poll every 2 seconds for new responses (prevents race conditions between multiple instances)
-setInterval(async () => {
-  try {
-    pollCount++;
-    // Only log pollCount every 30 polls (approx 1 minute) to reduce noise
-    if (pollCount % 30 === 0) logger.debug({ pollCount }, "🔄 Polling /respuestas (heartbeat)");
+  slugSnapshot.ref.on('child_added', (chatIdSnapshot) => {
+    const chatId = chatIdSnapshot.key;
 
-    // ⚠️ PERFORMANCE NOTE: This queries ALL respuestas nodes (including sent ones)
-    // Firebase RTDB doesn't support querying for "field not exists" efficiently
-    // The filter `enviado === true` at line ~947 skips already-sent messages
-    // TODO: For better scalability, consider:
-    //   1. Separate /respuestas_pendientes and /respuestas_enviadas paths
-    //   2. Or use Firestore which supports better queries
-    const snapshot = await respuestasRef.once('value');
-    if (!snapshot.exists()) return;
-
-    const respuestas = snapshot.val();
-
-    // Iterate through all slugs (stores)
-    for (const slug in respuestas) {
-      if (!respuestas[slug]) continue;
-
-      // Iterate through all chats
-      for (const chatId in respuestas[slug]) {
-        // Filter: Only process web_ chat IDs
-        if (!chatId.startsWith('web_')) continue;
-
-        // Iterate through all messages in the chat
-        for (const responseId in respuestas[slug][chatId]) {
-          const response = respuestas[slug][chatId][responseId];
-          const responsePath = `${slug}/${chatId}/${responseId}`;
-
-          // ============================================================
-          // 🛡️ FIX 1: SKIP ALREADY SENT
-          // If message is already sent, skip it (no longer delete).
-          // Messages are kept for conversation history.
-          // ============================================================
-          if (response.enviado === true) {
-            logger.debug({ responsePath }, "⏭️ SKIP: Already sent (enviado: true)");
-            continue;
-          }
-
-          // Check local memory cache to avoid reprocessing in same cycle
-          if (processedResponses.has(responsePath)) continue;
-          processedResponses.add(responsePath);
-
-          const text = response?.text;
-          // Safety check for invalid content
-          if (!text || typeof text !== 'string') {
-             // Mark as invalid instead of deleting
-             logger.warn({ responsePath }, "❌ INVALID: Response has no text. Marking as failed.");
-             await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).update({
-               enviado: true,
-               enviadoAt: Date.now(),
-               sendError: "Invalid message: no text field"
-             });
-             continue;
-          }
-
-          // Protection: Skip old messages from before reboot
-          const messageTimestamp = response.ts || 0;
-          if (messageTimestamp < serviceStartupTime) {
-            logger.warn({ responsePath }, "⏰ EXPIRED: Message older than service startup. Marking as expired.");
-            await db.ref(`/respuestas/${slug}/${chatId}/${responseId}`).update({
-              enviado: true,
-              enviadoAt: Date.now(),
-              sendError: "Message expired (older than service startup)"
-            });
-            continue;
-          }
-
-          logger.info({ responsePath }, "🔵 NEW MESSAGE: Attempting Transaction");
-
-          // 🛡️ FIX 2: TRANSACTION LOCK
-          const responseRef = db.ref(`/respuestas/${slug}/${chatId}/${responseId}`);
-          const claimResult = await responseRef.child('enviado').transaction((currentValue) => {
-            if (currentValue === true) return; // Abort if someone else took it
-            return true; // Lock it
-          });
-
-          if (!claimResult.committed) {
-            logger.debug({ responsePath }, "🔒 Locked by another thread/process");
-            continue;
-          }
-
-          // --- SENDING LOGIC STARTS HERE ---
-          try {
-            const phoneNumber = chatId.replace('web_', '');
-
-            // 1. Get Instance Mapping
-            let instanceName = null;
-            let apiKey = null;
-
-            const chatInstanceSnapshot = await db.ref(`/chat_instances/${slug}/${chatId}`).get();
-            if (chatInstanceSnapshot.exists()) {
-              const mappedInstance = chatInstanceSnapshot.val().instanceName;
-              const instanceLookup = await db.ref(`/evolution_instances/${mappedInstance}`).get();
-              if (instanceLookup.exists()) {
-                instanceName = mappedInstance;
-                apiKey = instanceLookup.val().apiKey;
-              }
-            }
-
-            // 2. Fallback to Primary
-            if (!instanceName) {
-              const tiendaIdSnapshot = await db.ref(`/tiendas_por_slug/${slug}`).get();
-              if (tiendaIdSnapshot.exists()) {
-                 const tiendaId = tiendaIdSnapshot.val();
-                 const evolutionSnapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
-                 if (evolutionSnapshot.exists()) {
-                   instanceName = evolutionSnapshot.val().instanceName;
-                   apiKey = evolutionSnapshot.val().apiKey;
-                 }
-              }
-            }
-
-            if (instanceName && apiKey) {
-              logger.info({ responsePath, instanceName }, "🚀 SENDING to WhatsApp...");
-
-              await retryWithBackoff(async () => {
-                return await evolution.post(
-                  `/message/sendText/${encodeURIComponent(instanceName)}`,
-                  { number: phoneNumber, text: text },
-                  { headers: { apikey: apiKey } }
-                );
-              }, 3, 1000);
-
-              // Mark as sent successfully with timestamp
-              await responseRef.update({
-                enviado: true,
-                enviadoAt: Date.now(),
-                instanceUsed: instanceName
-              });
-
-              logger.info({ responsePath }, "✅ SENT. Marked in DB.");
-            } else {
-              logger.error({ responsePath }, "❌ NO INSTANCE FOUND. Marking to prevent loop.");
-              // Mark as failed due to no instance
-              await responseRef.update({
-                enviado: true,
-                enviadoAt: Date.now(),
-                sendError: "No WhatsApp instance found"
-              });
-            }
-
-          } catch (err) {
-            logger.error({ err, responsePath }, "❌ SEND FAILED");
-            // Mark as failed instead of deleting
-            await responseRef.update({
-              enviado: true,
-              enviadoAt: Date.now(),
-              sendError: err?.message || String(err)
-            });
-          } finally {
-            // 🛡️ MODIFIED: Don't delete - messages are now kept for history
-            // The 'enviado: true' flag (set by transaction or in catch block)
-            // prevents reprocessing in future polls
-            processedResponses.delete(responsePath);
-          }
-        }
-      }
+    // Only process web_ chat IDs (WhatsApp messages formatted as web)
+    if (!chatId.startsWith('web_')) {
+      logger.debug({ slug, chatId }, "⚪ SKIP: Not a web_ chatId");
+      return;
     }
-  } catch (err) {
-    logger.error({ err }, "Error in polling loop");
-  }
-}, 2000);
 
-logger.info("Firebase response polling initialized (2s interval, transaction-protected)");
+    logger.info({ slug, chatId }, "🟡 NEW CHAT detected under slug");
+
+    chatIdSnapshot.ref.on('child_added', async (responseSnapshot) => {
+      const responseId = responseSnapshot.key;
+      const responsePath = `${slug}/${chatId}/${responseId}`;
+
+      // Check if already processed
+      if (processedResponses.has(responsePath)) {
+        logger.debug({ responsePath }, "⚪ SKIP: Already in processedResponses Set");
+        return;
+      }
+      processedResponses.add(responsePath);
+
+      const response = responseSnapshot.val();
+
+      logger.info({
+        slug,
+        chatId,
+        responseId,
+        responsePath,
+        hasText: !!response?.text,
+        enviado: response?.enviado,
+        ts: response?.ts,
+        processedSetSize: processedResponses.size
+      }, "🔴 NEW RESPONSE detected - STARTING PROCESSING");
+
+      const text = response?.text;
+
+      if (!text || typeof text !== 'string') {
+        logger.warn({ responsePath, response }, "❌ SKIP: Response has no text");
+        return;
+      }
+
+      // PROTECTION 1: Skip if already marked as sent
+      if (response.enviado === true) {
+        logger.warn({ responsePath }, "❌ SKIP: Response already marked as enviado=true");
+        return;
+      }
+
+      // PROTECTION 2: Skip if message is older than service startup (prevents resending on restart)
+      const messageTimestamp = response.ts || 0;
+      if (messageTimestamp < serviceStartupTime) {
+        logger.warn({
+          responsePath,
+          messageTimestamp,
+          serviceStartupTime,
+          diff: serviceStartupTime - messageTimestamp,
+          messageDate: new Date(messageTimestamp).toISOString(),
+          startupDate: new Date(serviceStartupTime).toISOString()
+        }, "❌ SKIP: Message older than service startup");
+        return;
+      }
+
+      logger.info({ responsePath, messageTimestamp, serviceStartupTime }, "🔵 ATTEMPTING TRANSACTION to claim message");
+
+      // PROTECTION 3: Use Firebase transaction to atomically claim this message
+      // This prevents race conditions when multiple service instances are running
+      const claimResult = await responseSnapshot.ref.child('enviado').transaction((currentValue) => {
+        if (currentValue === true) {
+          // Already claimed by another instance, abort
+          logger.debug({ responsePath, currentValue }, "Transaction sees enviado=true, aborting");
+          return; // returning undefined aborts the transaction
+        }
+        logger.debug({ responsePath, currentValue }, "Transaction claiming message (setting enviado=true)");
+        return true; // Claim it
+      });
+
+      if (!claimResult.committed) {
+        logger.warn({
+          responsePath,
+          committed: claimResult.committed,
+          snapshot: claimResult.snapshot?.val()
+        }, "❌ TRANSACTION FAILED: Message already claimed by another instance");
+        return;
+      }
+
+      logger.info({ responsePath }, "✅ TRANSACTION SUCCESS: Message claimed by this instance");
+
+      try {
+        logger.info({ responsePath }, "📞 Starting message send process");
+
+        // Extract phone number from chatId: "web_18091234567" -> "18091234567"
+        const phoneNumber = chatId.replace('web_', '');
+        logger.debug({ responsePath, phoneNumber }, "Extracted phone number from chatId");
+
+        // Get tiendaId from slug
+        const tiendaIdSnapshot = await db.ref(`/tiendas_por_slug/${slug}`).get();
+        if (!tiendaIdSnapshot.exists()) {
+          logger.error({ slug, responsePath }, "❌ No tiendaId found for slug");
+          return;
+        }
+
+        const tiendaId = tiendaIdSnapshot.val();
+        logger.debug({ slug, tiendaId, responsePath }, "Found tiendaId for slug");
+
+        // Check chat-to-instance mapping to find which number received the original message
+        let instanceName = null;
+        let apiKey = null;
+
+        logger.debug({ slug, chatId, responsePath }, "Looking up chat instance mapping");
+        const chatInstanceSnapshot = await db.ref(`/chat_instances/${slug}/${chatId}`).get();
+        if (chatInstanceSnapshot.exists()) {
+          const chatInstance = chatInstanceSnapshot.val();
+          const mappedInstanceName = chatInstance.instanceName;
+          logger.debug({ responsePath, mappedInstanceName }, "Found chat instance mapping");
+
+          // Look up instance in /evolution_instances/ (reverse lookup)
+          const instanceLookup = await db.ref(`/evolution_instances/${mappedInstanceName}`).get();
+          if (instanceLookup.exists()) {
+            instanceName = mappedInstanceName;
+            apiKey = instanceLookup.val().apiKey;
+            logger.info({ slug, chatId, instanceName, responsePath }, "✅ Using mapped instance for response");
+          }
+        } else {
+          logger.debug({ responsePath }, "No chat instance mapping found, will use primary");
+        }
+
+        // Fallback: Use primary /evolution config if no mapping found
+        if (!instanceName || !apiKey) {
+          logger.debug({ tiendaId, responsePath }, "Falling back to primary evolution config");
+          const evolutionSnapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
+          if (!evolutionSnapshot.exists()) {
+            logger.error({ slug, tiendaId, responsePath }, "❌ No Evolution config found for tienda");
+            return;
+          }
+
+          const evolutionConfig = evolutionSnapshot.val();
+          instanceName = evolutionConfig.instanceName;
+          apiKey = evolutionConfig.apiKey;
+          logger.info({ slug, chatId, instanceName, responsePath }, "✅ Using primary instance for response (no mapping)");
+        }
+
+        if (!instanceName || !apiKey) {
+          logger.error({ slug, tiendaId, responsePath }, "❌ Missing instanceName or apiKey in Evolution config");
+          return;
+        }
+
+        // Send message via Evolution API with retry logic (3 attempts)
+        logger.info({
+          responsePath,
+          instanceName,
+          phoneNumber,
+          textPreview: text.substring(0, 50)
+        }, "🚀 SENDING MESSAGE via Evolution API");
+
+        const sendResponse = await retryWithBackoff(async () => {
+          return await evolution.post(
+            `/message/sendText/${encodeURIComponent(instanceName)}`,
+            {
+              number: phoneNumber,
+              text: text
+            },
+            {
+              headers: {
+                apikey: apiKey
+              }
+            }
+          );
+        }, 3, 1000);
+
+        logger.info({
+          chatId,
+          slug,
+          phoneNumber,
+          responseId,
+          instanceName,
+          textPreview: text.substring(0, 50),
+          fullText: text
+        }, "✅ MESSAGE SENT SUCCESSFULLY via WhatsApp");
+
+        // DELETE the response after sending to prevent replay on restart
+        // This is the most reliable way to prevent duplicate sends
+        logger.info({ responsePath }, "🗑️ DELETING response from Firebase");
+        await responseSnapshot.ref.remove();
+        logger.info({ responsePath }, "✅ Response deleted after successful send");
+
+      } catch (err) {
+        logger.error({
+          err,
+          chatId,
+          slug,
+          responseId
+        }, "Failed to send WhatsApp message");
+      }
+    });
+  });
+});
+
+logger.info("Firebase listener initialized for /respuestas/");
 
 const port = Number.parseInt(process.env.PORT ?? "4001", 10);
 http.createServer(app).listen(port, () => {

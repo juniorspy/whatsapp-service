@@ -157,6 +157,39 @@ const fetchQr = async (instanceName, apiKey) => {
   return data?.code ?? null;
 };
 
+const fetchPairingCode = async (instanceName, apiKey) => {
+  try {
+    // Evolution API v2: Solicitar código de emparejamiento
+    // Endpoint correcto: POST /instance/mobile con el número de teléfono
+    const response = await evolution.post(
+      `/instance/mobile/${encodeURIComponent(instanceName)}`,
+      {
+        number: "" // Dejar vacío para generar código sin número específico
+      },
+      {
+        headers: { apikey: apiKey }
+      }
+    );
+
+    const data = response.data;
+    logger.info({ data }, "Pairing code response from Evolution");
+
+    // El código viene en diferentes formatos según la versión de Evolution
+    const code = data?.code ?? data?.pairingCode ?? data?.mobile?.code ?? null;
+
+    // Validar que sea un código de 8 dígitos
+    if (code && /^\d{8}$/.test(code)) {
+      return code;
+    }
+
+    logger.warn({ code, data }, "Invalid pairing code format received");
+    return null;
+  } catch (error) {
+    logger.error({ error: error.message, instanceName }, "Failed to fetch pairing code");
+    return null;
+  }
+};
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
@@ -208,7 +241,9 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       ? (data.qrcode.base64.startsWith('data:')
           ? data.qrcode.base64
           : `data:image/png;base64,${data.qrcode.base64}`)
-      : (data?.qrcode?.code ?? null);
+      : null;
+
+    const pairingCode = data?.qrcode?.code ?? data?.code ?? null;
 
     const record = {
       instanceName,
@@ -218,6 +253,7 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       webhookUrl: whatsappServiceWebhook, // Save whatsapp-service URL
       status: "pending",
       qrCode: qrCodeData,
+      pairingCode: pairingCode,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -237,6 +273,7 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
       status: "pending",
       instanceName,
       qrCode: qrCodeData,
+      pairingCode: pairingCode,
       apiKey,
       evolutionResponse: data
     });
@@ -266,13 +303,21 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
     const connectionStatus = state?.instance?.connectionStatus ?? "close";
 
     let qrCode = config.qrCode;
+    let pairingCode = config.pairingCode;
     if (value.includeQr && connectionStatus !== "open") {
-      qrCode = await fetchQr(config.instanceName, config.apiKey);
+      const qrData = await fetchQr(config.instanceName, config.apiKey);
+      // fetchQr puede devolver base64 o código de emparejamiento
+      if (qrData && qrData.startsWith('data:')) {
+        qrCode = qrData;
+      } else {
+        pairingCode = qrData;
+      }
     }
 
     await db.ref(`/tiendas/${value.tiendaId}/evolution`).update({
       status: connectionStatus === "open" ? "connected" : "pending",
       qrCode,
+      pairingCode,
       lastSyncedAt: Date.now(),
       connectionStatus
     });
@@ -284,10 +329,54 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
       connectionStatus,
       number: state?.instance?.number ?? null,
       profileName: state?.instance?.profileName ?? null,
-      qrCode: value.includeQr ? qrCode : undefined
+      qrCode: value.includeQr ? qrCode : undefined,
+      pairingCode: value.includeQr ? pairingCode : undefined
     });
   } catch (err) {
     logger.error({ err }, "Failed to fetch Evolution status");
+    res.status(502).json({ error: "evolution_error", message: err.message });
+  }
+});
+
+// Get pairing code for existing instance
+app.get("/api/v1/whatsapp/pairing-code", async (req, res) => {
+  const { error, value } = statusSchema.validate(req.query, { convert: true });
+  if (error) {
+    return res.status(400).json({
+      error: "validation_error",
+      details: error.details.map((detail) => detail.message)
+    });
+  }
+
+  try {
+    const snapshot = await db.ref(`/tiendas/${value.tiendaId}/evolution`).get();
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: "not_found", message: "No Evolution config for this tienda" });
+    }
+
+    const config = snapshot.val();
+    const pairingCode = await fetchPairingCode(config.instanceName, config.apiKey);
+
+    if (pairingCode) {
+      // Guardar código en Firebase
+      await db.ref(`/tiendas/${value.tiendaId}/evolution`).update({
+        pairingCode,
+        lastSyncedAt: Date.now()
+      });
+
+      res.json({
+        success: true,
+        pairingCode
+      });
+    } else {
+      res.status(404).json({
+        success: false,
+        error: "pairing_code_not_available",
+        message: "Pairing code not available from Evolution API"
+      });
+    }
+  } catch (err) {
+    logger.error({ err }, "Failed to fetch pairing code");
     res.status(502).json({ error: "evolution_error", message: err.message });
   }
 });
@@ -352,7 +441,9 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
       ? (data.qrcode.base64.startsWith('data:')
           ? data.qrcode.base64
           : `data:image/png;base64,${data.qrcode.base64}`)
-      : (data?.qrcode?.code ?? null);
+      : null;
+
+    const pairingCode = data?.qrcode?.code ?? data?.code ?? null;
 
     const numberId = `number_${nextSuffix}`;
     const record = {
@@ -364,6 +455,7 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
       webhookUrl: whatsappServiceWebhook,
       status: "pending",
       qrCode: qrCodeData,
+      pairingCode: pairingCode,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -388,6 +480,7 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
       instanceName,
       numberId,
       qrCode: qrCodeData,
+      pairingCode: pairingCode,
       apiKey
     });
   } catch (err) {
@@ -485,8 +578,15 @@ app.get("/api/v1/whatsapp/numbers/:numberId/status", async (req, res) => {
     const connectionStatus = state?.instance?.connectionStatus ?? "close";
 
     let qrCode = config.qrCode;
+    let pairingCode = config.pairingCode;
     if (includeQr && connectionStatus !== "open") {
-      qrCode = await fetchQr(config.instanceName, config.apiKey);
+      const qrData = await fetchQr(config.instanceName, config.apiKey);
+      // fetchQr puede devolver base64 o código de emparejamiento
+      if (qrData && qrData.startsWith('data:')) {
+        qrCode = qrData;
+      } else {
+        pairingCode = qrData;
+      }
     }
 
     // Update status in Firebase
@@ -497,6 +597,7 @@ app.get("/api/v1/whatsapp/numbers/:numberId/status", async (req, res) => {
     await db.ref(updatePath).update({
       status: connectionStatus === "open" ? "connected" : "pending",
       qrCode,
+      pairingCode,
       lastSyncedAt: Date.now(),
       connectionStatus
     });
@@ -509,7 +610,8 @@ app.get("/api/v1/whatsapp/numbers/:numberId/status", async (req, res) => {
       connectionStatus,
       number: state?.instance?.number ?? null,
       profileName: state?.instance?.profileName ?? null,
-      qrCode: includeQr ? qrCode : undefined
+      qrCode: includeQr ? qrCode : undefined,
+      pairingCode: includeQr ? pairingCode : undefined
     });
   } catch (err) {
     logger.error({ err, numberId }, "Failed to fetch number status");
@@ -774,16 +876,23 @@ async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
 // Listen to all /respuestas/ nodes for WhatsApp messages
 const respuestasRef = db.ref('/respuestas');
 
+logger.info("🔵 INITIALIZING /respuestas listener at service startup");
+logger.info({ serviceStartupTime, date: new Date(serviceStartupTime).toISOString() }, "Service startup timestamp");
+
 respuestasRef.on('child_added', (slugSnapshot) => {
   const slug = slugSnapshot.key;
+  logger.info({ slug }, "🟢 NEW SLUG detected in /respuestas/");
 
   slugSnapshot.ref.on('child_added', (chatIdSnapshot) => {
     const chatId = chatIdSnapshot.key;
 
     // Only process web_ chat IDs (WhatsApp messages formatted as web)
     if (!chatId.startsWith('web_')) {
+      logger.debug({ slug, chatId }, "⚪ SKIP: Not a web_ chatId");
       return;
     }
+
+    logger.info({ slug, chatId }, "🟡 NEW CHAT detected under slug");
 
     chatIdSnapshot.ref.on('child_added', async (responseSnapshot) => {
       const responseId = responseSnapshot.key;
@@ -791,102 +900,143 @@ respuestasRef.on('child_added', (slugSnapshot) => {
 
       // Check if already processed
       if (processedResponses.has(responsePath)) {
+        logger.debug({ responsePath }, "⚪ SKIP: Already in processedResponses Set");
         return;
       }
       processedResponses.add(responsePath);
 
       const response = responseSnapshot.val();
+
+      logger.info({
+        slug,
+        chatId,
+        responseId,
+        responsePath,
+        hasText: !!response?.text,
+        enviado: response?.enviado,
+        ts: response?.ts,
+        processedSetSize: processedResponses.size
+      }, "🔴 NEW RESPONSE detected - STARTING PROCESSING");
+
       const text = response?.text;
 
       if (!text || typeof text !== 'string') {
-        logger.debug({ responsePath }, "Skipping response without text");
+        logger.warn({ responsePath, response }, "❌ SKIP: Response has no text");
         return;
       }
 
       // PROTECTION 1: Skip if already marked as sent
       if (response.enviado === true) {
-        logger.debug({ responsePath }, "Skipping response already marked as sent");
+        logger.warn({ responsePath }, "❌ SKIP: Response already marked as enviado=true");
         return;
       }
 
       // PROTECTION 2: Skip if message is older than service startup (prevents resending on restart)
       const messageTimestamp = response.ts || 0;
       if (messageTimestamp < serviceStartupTime) {
-        logger.debug({
+        logger.warn({
           responsePath,
           messageTimestamp,
           serviceStartupTime,
-          diff: serviceStartupTime - messageTimestamp
-        }, "Skipping old message from before service restart");
+          diff: serviceStartupTime - messageTimestamp,
+          messageDate: new Date(messageTimestamp).toISOString(),
+          startupDate: new Date(serviceStartupTime).toISOString()
+        }, "❌ SKIP: Message older than service startup");
         return;
       }
+
+      logger.info({ responsePath, messageTimestamp, serviceStartupTime }, "🔵 ATTEMPTING TRANSACTION to claim message");
 
       // PROTECTION 3: Use Firebase transaction to atomically claim this message
       // This prevents race conditions when multiple service instances are running
       const claimResult = await responseSnapshot.ref.child('enviado').transaction((currentValue) => {
         if (currentValue === true) {
           // Already claimed by another instance, abort
+          logger.debug({ responsePath, currentValue }, "Transaction sees enviado=true, aborting");
           return; // returning undefined aborts the transaction
         }
+        logger.debug({ responsePath, currentValue }, "Transaction claiming message (setting enviado=true)");
         return true; // Claim it
       });
 
       if (!claimResult.committed) {
-        logger.debug({ responsePath }, "Message already claimed by another instance (transaction aborted)");
+        logger.warn({
+          responsePath,
+          committed: claimResult.committed,
+          snapshot: claimResult.snapshot?.val()
+        }, "❌ TRANSACTION FAILED: Message already claimed by another instance");
         return;
       }
 
+      logger.info({ responsePath }, "✅ TRANSACTION SUCCESS: Message claimed by this instance");
+
       try {
+        logger.info({ responsePath }, "📞 Starting message send process");
+
         // Extract phone number from chatId: "web_18091234567" -> "18091234567"
         const phoneNumber = chatId.replace('web_', '');
+        logger.debug({ responsePath, phoneNumber }, "Extracted phone number from chatId");
 
         // Get tiendaId from slug
         const tiendaIdSnapshot = await db.ref(`/tiendas_por_slug/${slug}`).get();
         if (!tiendaIdSnapshot.exists()) {
-          logger.warn({ slug }, "No tiendaId found for slug");
+          logger.error({ slug, responsePath }, "❌ No tiendaId found for slug");
           return;
         }
 
         const tiendaId = tiendaIdSnapshot.val();
+        logger.debug({ slug, tiendaId, responsePath }, "Found tiendaId for slug");
 
         // Check chat-to-instance mapping to find which number received the original message
         let instanceName = null;
         let apiKey = null;
 
+        logger.debug({ slug, chatId, responsePath }, "Looking up chat instance mapping");
         const chatInstanceSnapshot = await db.ref(`/chat_instances/${slug}/${chatId}`).get();
         if (chatInstanceSnapshot.exists()) {
           const chatInstance = chatInstanceSnapshot.val();
           const mappedInstanceName = chatInstance.instanceName;
+          logger.debug({ responsePath, mappedInstanceName }, "Found chat instance mapping");
 
           // Look up instance in /evolution_instances/ (reverse lookup)
           const instanceLookup = await db.ref(`/evolution_instances/${mappedInstanceName}`).get();
           if (instanceLookup.exists()) {
             instanceName = mappedInstanceName;
             apiKey = instanceLookup.val().apiKey;
-            logger.debug({ slug, chatId, instanceName }, "Using mapped instance for response");
+            logger.info({ slug, chatId, instanceName, responsePath }, "✅ Using mapped instance for response");
           }
+        } else {
+          logger.debug({ responsePath }, "No chat instance mapping found, will use primary");
         }
 
         // Fallback: Use primary /evolution config if no mapping found
         if (!instanceName || !apiKey) {
+          logger.debug({ tiendaId, responsePath }, "Falling back to primary evolution config");
           const evolutionSnapshot = await db.ref(`/tiendas/${tiendaId}/evolution`).get();
           if (!evolutionSnapshot.exists()) {
-            logger.warn({ slug, tiendaId }, "No Evolution config found for tienda");
+            logger.error({ slug, tiendaId, responsePath }, "❌ No Evolution config found for tienda");
             return;
           }
 
           const evolutionConfig = evolutionSnapshot.val();
           instanceName = evolutionConfig.instanceName;
           apiKey = evolutionConfig.apiKey;
-          logger.debug({ slug, chatId, instanceName }, "Using primary instance for response (no mapping)");
+          logger.info({ slug, chatId, instanceName, responsePath }, "✅ Using primary instance for response (no mapping)");
         }
 
         if (!instanceName || !apiKey) {
-          logger.warn({ slug, tiendaId }, "Missing instanceName or apiKey in Evolution config");
+          logger.error({ slug, tiendaId, responsePath }, "❌ Missing instanceName or apiKey in Evolution config");
           return;
         }
 
         // Send message via Evolution API with retry logic (3 attempts)
+        logger.info({
+          responsePath,
+          instanceName,
+          phoneNumber,
+          textPreview: text.substring(0, 50)
+        }, "🚀 SENDING MESSAGE via Evolution API");
+
         const sendResponse = await retryWithBackoff(async () => {
           return await evolution.post(
             `/message/sendText/${encodeURIComponent(instanceName)}`,
@@ -907,13 +1057,16 @@ respuestasRef.on('child_added', (slugSnapshot) => {
           slug,
           phoneNumber,
           responseId,
-          text: text.substring(0, 50)
-        }, "Message sent via WhatsApp");
+          instanceName,
+          textPreview: text.substring(0, 50),
+          fullText: text
+        }, "✅ MESSAGE SENT SUCCESSFULLY via WhatsApp");
 
-        // DELETE the response after sending to prevent replay on restart
-        // This is the most reliable way to prevent duplicate sends
-        await responseSnapshot.ref.remove();
-        logger.debug({ responsePath }, "Response deleted after successful send");
+        // UPDATE the response with timestamp to keep history instead of deleting
+        // The enviado=true flag (set by transaction above) already prevents duplicate sends
+        logger.info({ responsePath }, "📝 UPDATING response with sentAt timestamp");
+        await responseSnapshot.ref.update({ sentAt: Date.now(), status: 'sent' });
+        logger.info({ responsePath }, "✅ Response updated after successful send");
 
       } catch (err) {
         logger.error({

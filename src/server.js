@@ -157,11 +157,44 @@ const fetchQr = async (instanceName, apiKey) => {
   return data?.code ?? null;
 };
 
+const fetchPairingCode = async (instanceName, apiKey) => {
+  try {
+    // Evolution API v2: Solicitar código de emparejamiento
+    // Endpoint correcto: POST /instance/mobile con el número de teléfono
+    const response = await evolution.post(
+      `/instance/mobile/${encodeURIComponent(instanceName)}`,
+      {
+        number: "" // Dejar vacío para generar código sin número específico
+      },
+      {
+        headers: { apikey: apiKey }
+      }
+    );
+
+    const data = response.data;
+    logger.info({ data }, "Pairing code response from Evolution");
+
+    // El código viene en diferentes formatos según la versión de Evolution
+    const code = data?.code ?? data?.pairingCode ?? data?.mobile?.code ?? null;
+
+    // Validar que sea un código de 8 dígitos
+    if (code && /^\d{8}$/.test(code)) {
+      return code;
+    }
+
+    logger.warn({ code, data }, "Invalid pairing code format received");
+    return null;
+  } catch (error) {
+    logger.error({ error: error.message, instanceName }, "Failed to fetch pairing code");
+    return null;
+  }
+};
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Debug endpoint - logs everything.
+// Debug endpoint - logs everything
 app.post("/webhook/evolution/debug", (req, res) => {
   logger.info({
     headers: req.headers,
@@ -301,6 +334,49 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
     });
   } catch (err) {
     logger.error({ err }, "Failed to fetch Evolution status");
+    res.status(502).json({ error: "evolution_error", message: err.message });
+  }
+});
+
+// Get pairing code for existing instance
+app.get("/api/v1/whatsapp/pairing-code", async (req, res) => {
+  const { error, value } = statusSchema.validate(req.query, { convert: true });
+  if (error) {
+    return res.status(400).json({
+      error: "validation_error",
+      details: error.details.map((detail) => detail.message)
+    });
+  }
+
+  try {
+    const snapshot = await db.ref(`/tiendas/${value.tiendaId}/evolution`).get();
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: "not_found", message: "No Evolution config for this tienda" });
+    }
+
+    const config = snapshot.val();
+    const pairingCode = await fetchPairingCode(config.instanceName, config.apiKey);
+
+    if (pairingCode) {
+      // Guardar código en Firebase
+      await db.ref(`/tiendas/${value.tiendaId}/evolution`).update({
+        pairingCode,
+        lastSyncedAt: Date.now()
+      });
+
+      res.json({
+        success: true,
+        pairingCode
+      });
+    } else {
+      res.status(404).json({
+        success: false,
+        error: "pairing_code_not_available",
+        message: "Pairing code not available from Evolution API"
+      });
+    }
+  } catch (err) {
+    logger.error({ err }, "Failed to fetch pairing code");
     res.status(502).json({ error: "evolution_error", message: err.message });
   }
 });
@@ -986,11 +1062,11 @@ respuestasRef.on('child_added', (slugSnapshot) => {
           fullText: text
         }, "✅ MESSAGE SENT SUCCESSFULLY via WhatsApp");
 
-        // DELETE the response after sending to prevent replay on restart
-        // This is the most reliable way to prevent duplicate sends
-        logger.info({ responsePath }, "🗑️ DELETING response from Firebase");
-        await responseSnapshot.ref.remove();
-        logger.info({ responsePath }, "✅ Response deleted after successful send");
+        // UPDATE the response with timestamp to keep history instead of deleting
+        // The enviado=true flag (set by transaction above) already prevents duplicate sends
+        logger.info({ responsePath }, "📝 UPDATING response with sentAt timestamp");
+        await responseSnapshot.ref.update({ sentAt: Date.now(), status: 'sent' });
+        logger.info({ responsePath }, "✅ Response updated after successful send");
 
       } catch (err) {
         logger.error({

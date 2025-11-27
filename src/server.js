@@ -157,6 +157,22 @@ const fetchQr = async (instanceName, apiKey) => {
   return data?.code ?? null;
 };
 
+const fetchPairingCode = async (instanceName, apiKey) => {
+  try {
+    // Intentar obtener código de emparejamiento desde Evolution API
+    // Algunos endpoints posibles: /instance/mobile, /instance/code, /instance/connect
+    const response = await evolution.get(`/instance/connect/${encodeURIComponent(instanceName)}`, {
+      headers: { apikey: apiKey },
+      params: { mobile: true } // Solicitar código en lugar de QR
+    });
+    const data = response.data;
+    return data?.code ?? data?.pairingCode ?? null;
+  } catch (error) {
+    logger.error({ error, instanceName }, "Failed to fetch pairing code");
+    return null;
+  }
+};
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
@@ -301,6 +317,49 @@ app.get("/api/v1/whatsapp/status", async (req, res) => {
     });
   } catch (err) {
     logger.error({ err }, "Failed to fetch Evolution status");
+    res.status(502).json({ error: "evolution_error", message: err.message });
+  }
+});
+
+// Get pairing code for existing instance
+app.get("/api/v1/whatsapp/pairing-code", async (req, res) => {
+  const { error, value } = statusSchema.validate(req.query, { convert: true });
+  if (error) {
+    return res.status(400).json({
+      error: "validation_error",
+      details: error.details.map((detail) => detail.message)
+    });
+  }
+
+  try {
+    const snapshot = await db.ref(`/tiendas/${value.tiendaId}/evolution`).get();
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: "not_found", message: "No Evolution config for this tienda" });
+    }
+
+    const config = snapshot.val();
+    const pairingCode = await fetchPairingCode(config.instanceName, config.apiKey);
+
+    if (pairingCode) {
+      // Guardar código en Firebase
+      await db.ref(`/tiendas/${value.tiendaId}/evolution`).update({
+        pairingCode,
+        lastSyncedAt: Date.now()
+      });
+
+      res.json({
+        success: true,
+        pairingCode
+      });
+    } else {
+      res.status(404).json({
+        success: false,
+        error: "pairing_code_not_available",
+        message: "Pairing code not available from Evolution API"
+      });
+    }
+  } catch (err) {
+    logger.error({ err }, "Failed to fetch pairing code");
     res.status(502).json({ error: "evolution_error", message: err.message });
   }
 });

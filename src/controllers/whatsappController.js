@@ -667,12 +667,13 @@ export const deleteWhatsAppNumber = async ({ tiendaId, numberId }) => {
     );
   }
 
-  // IMPORTANT: Close session and delete instance from Evolution API BEFORE deleting from Firebase
+  // Try to delete from Evolution API, but ALWAYS continue to delete from Firebase
+  // A cleanup service will handle orphaned Evolution instances
   if (config.instanceName) {
     try {
       logger.info(
         { tiendaId, numberId, instanceName: config.instanceName },
-        "Deleting Evolution instance before removing from Firebase"
+        "Attempting to delete Evolution instance"
       );
 
       await deleteInstance({ instanceName: config.instanceName });
@@ -682,7 +683,8 @@ export const deleteWhatsAppNumber = async ({ tiendaId, numberId }) => {
         "Evolution instance deleted successfully"
       );
     } catch (error) {
-      // Log but don't fail if Evolution deletion fails (instance might already be gone)
+      // Log but NEVER fail - always continue to delete from Firebase
+      // Orphaned Evolution instances will be cleaned up by a separate service
       logger.warn(
         {
           tiendaId,
@@ -691,13 +693,8 @@ export const deleteWhatsAppNumber = async ({ tiendaId, numberId }) => {
           error: error.message,
           status: error.status
         },
-        "Failed to delete Evolution instance (may already be deleted)"
+        "Failed to delete Evolution instance - continuing with Firebase deletion (cleanup service will handle orphans)"
       );
-
-      // Only fail if it's not a 404 (instance not found)
-      if (error.status && error.status !== 404) {
-        throw error;
-      }
     }
   }
 

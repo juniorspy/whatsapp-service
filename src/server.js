@@ -81,6 +81,78 @@ const normalizeSlug = (slug) =>
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
 
+const ensureSlugIndex = async (tiendaId, slug) => {
+  if (!tiendaId) {
+    throw new Error("tiendaId is required to index slug");
+  }
+
+  const normalizedSlug = normalizeSlug(slug);
+  const slugRef = db.ref(`/tiendas_por_slug/${normalizedSlug}`);
+  const snapshot = await slugRef.get();
+
+  if (snapshot.exists()) {
+    const existingTiendaId = snapshot.val();
+    if (existingTiendaId === tiendaId) {
+      logger.debug(
+        { slug: normalizedSlug, tiendaId },
+        "Slug already indexed for tienda"
+      );
+      return normalizedSlug;
+    }
+
+    logger.warn(
+      { slug: normalizedSlug, existingTiendaId, newTiendaId: tiendaId },
+      "Slug index pointed to another tienda, overwriting"
+    );
+  }
+
+  await slugRef.set(tiendaId);
+  logger.debug(
+    { slug: normalizedSlug, tiendaId },
+    "Slug index stored for tienda"
+  );
+  return normalizedSlug;
+};
+
+const rebuildSlugIndex = async () => {
+  try {
+    logger.info("Rebuilding slug index from existing tienda data");
+    const tiendasSnapshot = await db.ref("/tiendas").get();
+    if (!tiendasSnapshot.exists()) {
+      logger.warn("No tiendas found while rebuilding slug index");
+      return;
+    }
+
+    const tiendas = tiendasSnapshot.val();
+    let indexedCount = 0;
+
+    for (const [tiendaId, tiendaData] of Object.entries(tiendas)) {
+      const slugs = new Set();
+
+      if (tiendaData?.evolution?.slug) {
+        slugs.add(tiendaData.evolution.slug);
+      }
+
+      if (tiendaData?.whatsapp_numbers) {
+        Object.values(tiendaData.whatsapp_numbers).forEach((numberRecord) => {
+          if (numberRecord?.slug) {
+            slugs.add(numberRecord.slug);
+          }
+        });
+      }
+
+      for (const slugValue of slugs) {
+        await ensureSlugIndex(tiendaId, slugValue);
+        indexedCount += 1;
+      }
+    }
+
+    logger.info({ indexedCount }, "Slug index rebuild completed");
+  } catch (error) {
+    logger.error({ err: error }, "Failed to rebuild slug index");
+  }
+};
+
 const evolution = axios.create({
   baseURL: process.env.EVOLUTION_API_URL ?? process.env.EVOLUTION_BASE_URL ?? "https://evo.onrpa.com",
   timeout: Number.parseInt(process.env.EVOLUTION_TIMEOUT ?? "45000", 10)
@@ -216,7 +288,8 @@ app.post("/api/v1/whatsapp/connect-whatsapp-colmado", async (req, res) => {
   }
 
   try {
-    const instanceName = `colmado_${normalizeSlug(value.slug)}`;
+    const slugKey = await ensureSlugIndex(value.tiendaId, value.slug);
+    const instanceName = `colmado_${slugKey}`;
 
     // Webhook URL now points to whatsapp-service (multi-tenant endpoint)
     let whatsappServiceWebhook;
@@ -396,7 +469,8 @@ app.post("/api/v1/whatsapp/add-number", async (req, res) => {
   }
 
   try {
-    const baseInstanceName = `colmado_${normalizeSlug(value.slug)}`;
+    const slugKey = await ensureSlugIndex(value.tiendaId, value.slug);
+    const baseInstanceName = `colmado_${slugKey}`;
 
     // Find next available number suffix
     const existingNumbers = await db.ref(`/tiendas/${value.tiendaId}/whatsapp_numbers`).get();
@@ -659,7 +733,7 @@ app.post("/webhook/evolution", async (req, res) => {
       });
     }
 
-    const phoneNumber = remoteJid.replace('@s.whatsapp.net', '');
+    const phoneNumber = remoteJid.replace('@s.whatsapp.net', '').replace(/:.*$/, '');
     const chatId = `web_${phoneNumber}`;
 
     // Detect message type and extract content
@@ -838,6 +912,8 @@ app.post("/webhook/evolution", async (req, res) => {
     }
   }
 });
+
+await rebuildSlugIndex();
 
 // ============================================================================
 // Firebase Listener - Send bot responses via WhatsApp

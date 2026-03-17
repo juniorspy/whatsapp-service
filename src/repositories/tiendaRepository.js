@@ -9,6 +9,9 @@ import { logger } from "../utils/logger.js";
 const getEvolutionRef = (tiendaId) =>
   getRealtimeDatabase().ref(`/tiendas/${tiendaId}/evolution`);
 
+const getSlugIndexRef = (slug) =>
+  getRealtimeDatabase().ref(`/tiendas_por_slug/${slug}`);
+
 export const saveEvolutionConfig = async (tiendaId, data) => {
   const ref = getEvolutionRef(tiendaId);
   await ref.set(data);
@@ -23,6 +26,45 @@ export const getEvolutionConfig = async (tiendaId) => {
 export const updateEvolutionConfig = async (tiendaId, data) => {
   const ref = getEvolutionRef(tiendaId);
   await ref.update(data);
+};
+
+/**
+ * Ensure slug → tiendaId mapping exists so webhook routing can resolve stores.
+ */
+export const ensureSlugIndex = async (tiendaId, slug) => {
+  if (!tiendaId) {
+    throw new Error("tiendaId is required to index slug");
+  }
+
+  const normalizedSlug = (slug || "").trim();
+  if (!normalizedSlug) {
+    throw new Error("slug is required to index tienda");
+  }
+
+  const ref = getSlugIndexRef(normalizedSlug);
+  const snapshot = await ref.get();
+
+  if (snapshot.exists()) {
+    const existingTiendaId = snapshot.val();
+    if (existingTiendaId === tiendaId) {
+      logger.debug(
+        { slug: normalizedSlug, tiendaId },
+        "Slug index already points to this tienda"
+      );
+      return;
+    }
+
+    logger.warn(
+      { slug: normalizedSlug, existingTiendaId, newTiendaId: tiendaId },
+      "Overwriting slug index to point to new tienda"
+    );
+  }
+
+  await ref.set(tiendaId);
+  logger.info(
+    { slug: normalizedSlug, tiendaId },
+    "Slug index stored for tienda"
+  );
 };
 
 // Alias for clarity in migration code
@@ -269,6 +311,7 @@ export default {
   saveEvolutionConfig,
   getEvolutionConfig,
   updateEvolutionConfig,
+  ensureSlugIndex,
   getLegacyEvolutionConfig,
   hasLegacyEvolutionConfig,
 

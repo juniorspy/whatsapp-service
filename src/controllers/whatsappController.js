@@ -3,6 +3,7 @@ import {
   saveEvolutionConfig,
   getEvolutionConfig,
   updateEvolutionConfig,
+  ensureSlugIndex,
   // New multi-number functions
   saveWhatsAppNumber,
   getWhatsAppNumbers,
@@ -60,6 +61,7 @@ export const connectWhatsApp = async (payload) => {
   const { tiendaId, slug, telefono, webhookUrl } = payload;
 
   const normalizedSlug = normalizeSlug(slug);
+  await ensureSlugIndex(tiendaId, normalizedSlug);
   const instanceName = buildInstanceName(normalizedSlug);
 
   const existingConfig = await getEvolutionConfig(tiendaId);
@@ -341,6 +343,7 @@ export const connectWhatsAppNumber = async (payload) => {
   const { tiendaId, slug, telefono, webhookUrl, displayName } = payload;
 
   const normalizedSlug = normalizeSlug(slug);
+  await ensureSlugIndex(tiendaId, normalizedSlug);
   const instanceName = buildInstanceName(normalizedSlug);
 
   // Check if this number already exists

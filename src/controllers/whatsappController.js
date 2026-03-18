@@ -20,9 +20,9 @@ import { logger } from "../utils/logger.js";
 const normalizeSlug = (slug) =>
   slug
     .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
+    .replace(/[^a-z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
 
 const buildInstanceName = (slug) => `colmado_${normalizeSlug(slug)}`;
 

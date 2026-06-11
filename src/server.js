@@ -884,10 +884,63 @@ app.post("/webhook/evolution", async (req, res) => {
     let messageType = 'text';
     let text = '';
     let audioData = null;
+    let imageData = null;
 
+    // Check for image
+    const imageMessage = data?.message?.imageMessage;
+    if (imageMessage) {
+      messageType = 'image';
+
+      let imageBase64 = null;
+      try {
+        const instanceConfig = await db.ref(`/evolution_instances/${instance}`).once('value');
+        const apiKey = instanceConfig.val()?.apiKey;
+
+        if (apiKey && data?.key?.id) {
+          logger.info({ instance, messageId: data.key.id }, "Downloading image from Evolution API");
+          const mediaResponse = await evolution.post(
+            `/chat/getBase64FromMediaMessage/${encodeURIComponent(instance)}`,
+            {
+              message: {
+                key: {
+                  id: data.key.id
+                }
+              }
+            },
+            {
+              headers: { apikey: apiKey },
+              timeout: 30000
+            }
+          );
+          imageBase64 = mediaResponse.data?.base64 || null;
+          logger.info({ hasBase64: !!imageBase64 }, "Image download completed");
+        } else {
+          logger.warn({ instance }, "Cannot download image: missing API key or message ID");
+        }
+      } catch (downloadError) {
+        logger.error({ err: downloadError, instance }, "Failed to download image from Evolution API");
+      }
+
+      imageData = {
+        url: imageMessage.url || null,
+        base64: imageBase64,
+        mimetype: imageMessage.mimetype || 'image/jpeg',
+        caption: imageMessage.caption || '',
+        width: imageMessage.width || null,
+        height: imageMessage.height || null,
+        fileLength: imageMessage.fileLength || null,
+        mediaKey: imageMessage.mediaKey || null,
+        fileSha256: imageMessage.fileSha256 || null
+      };
+      text = imageData.caption?.trim() || '[Imagen]';
+      logger.info({
+        chatId,
+        imageData: { ...imageData, base64: imageBase64 ? '[REDACTED]' : null }
+      }, "Image message detected");
+    }
     // Check for audio/voice note
     const audioMessage = data?.message?.audioMessage;
-    if (audioMessage) {
+    if (!imageMessage && audioMessage) {
       messageType = 'audio';
 
       // Download audio as base64 from Evolution API
@@ -938,7 +991,7 @@ app.post("/webhook/evolution", async (req, res) => {
       };
       text = `[Audio message - ${audioData.seconds}s]`; // Placeholder text for logs
       logger.info({ chatId, audioData: { ...audioData, base64: audioBase64 ? '[REDACTED]' : null } }, "Audio message detected");
-    } else {
+    } else if (!imageMessage) {
       // Extract text message
       text = getTextFromEvolutionMessage(data);
 
@@ -1012,6 +1065,9 @@ app.post("/webhook/evolution", async (req, res) => {
       basePayload.audio = audioData;
       basePayload.meta.audio = audioData;
     }
+    if (imageData) {
+      basePayload.image = imageData;
+    }
 
     // 2. Enrich payload dynamically with caching (60s TTL)
     const enrichedPayload = await enrichWhatsAppPayload(basePayload);
@@ -1035,7 +1091,8 @@ app.post("/webhook/evolution", async (req, res) => {
       firstInSession: enrichedPayload.meta.firstInSession,
       sessionStartTs: enrichedPayload.sessionStartTs,
       text: text.substring(0, 50),
-      hasAudio: audioData !== null
+      hasAudio: audioData !== null,
+      hasImage: imageData !== null
     }, "Enriched message written to Firebase /mensajes/ (with cache)");
 
     // Cloud Functions will detect and process automatically
